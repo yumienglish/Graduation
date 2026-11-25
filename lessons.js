@@ -12,7 +12,12 @@
    • h: gợi ý tiếng Việt, chỉ hiện khi làm lại câu sai, KHÔNG ghi đáp án (mảng = 1 gợi ý / chỗ trống trong đoạn).
    • newWords = ô New words (copy: false = chỉ học, không bắt chép vở).
    ===================================================================== */
-const OPEN_WEEK = 2;            // mở cả 2 màn (cô chọn 25/11)
+// mở cả 2 màn (cô chọn 25/11)
+/* ---- MỞ TUẦN ----
+   OPEN_WEEK_SET = màn mở tay (như trước đây). OPEN_DATES = ngày TỰ MỞ từng màn (0h giờ Việt Nam), VD { 3: '2026-12-01', 4: '2026-12-08' }:
+   đến ngày đó màn tự mở, không cần sửa số. Chỉ tự mở khi màn đó đã có bài. Màn chưa mở vẫn xem trước được bằng ?preview. */
+const OPEN_WEEK_SET = 2;
+const OPEN_DATES = {};
 
 // Máy chủ nhận bài (Code.gs dùng chung với các trang BTVN khác)
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyAom9bBpL0ms0VD7_bz5w691011llkFzttYSjKDyRyMCjLLeUZ4EZGGJLtLMFWuiV4sA/exec';
@@ -411,3 +416,6 @@ const LESSONS = {
 /* Boss fight / Side quest: chưa có (cô giao thêm thì soạn giống trang B2 First). */
 const BOSSES = [];
 const SIDEQUESTS = [];
+
+// Tuần đang mở = số lớn nhất giữa OPEN_WEEK_SET và các mục OPEN_DATES đã tới ngày (giờ VN) + đã có bài
+const OPEN_WEEK = Object.keys(OPEN_DATES).reduce((w, k) => (+k > w && LESSONS[k] && Date.parse(OPEN_DATES[k] + 'T00:00:00+07:00') <= Date.now() ? +k : w), OPEN_WEEK_SET);
