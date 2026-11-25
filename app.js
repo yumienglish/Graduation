@@ -1,0 +1,1222 @@
+/* FCE Graduation – giao diện, chấm điểm, làm lại câu sai, gửi bài */
+'use strict';
+
+/* ============ TIỆN ÍCH ============ */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const ia = 'autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"';
+const lsGet = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+// Từ mới: {{khoá}} hoặc {{khoá|chữ hiển thị}} → nút bấm xem nghĩa
+const VRE = /\{\{([^}|]+)(?:\|([^}]+))?\}\}/g;
+const vt = s => String(s || '').replace(VRE, (_, k, shown) =>
+  VOCAB[k] ? `<button type="button" class="vw" data-v="${esc(k)}">${esc(shown || k)}</button>` : esc(shown || k));
+const unv = s => String(s || '').replace(VRE, (_, k, shown) => shown || k);
+const plain = s => unv(s).replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+
+/* ============ TỪ MỚI: bong bóng nghĩa + phát âm ============ */
+let VOICE = null;
+function pickVoice(){
+  try {
+    const vs = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang));
+    VOICE = vs.find(v => /^en[-_]GB/i.test(v.lang) && /female|libby|sonia|serena|kate|hazel|google uk english female/i.test(v.name)) ||
+      vs.find(v => /^en[-_]GB/i.test(v.lang)) || vs.find(v => /^en[-_]US/i.test(v.lang)) || vs[0] || null;
+  } catch (e) {}
+}
+if ('speechSynthesis' in window){ pickVoice(); try { speechSynthesis.onvoiceschanged = pickVoice; } catch (e) {} }
+function say(text){
+  try {
+    if (!('speechSynthesis' in window) || !text) return;
+    speechSynthesis.cancel(); try { speechSynthesis.resume(); } catch (e) {}
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = VOICE ? VOICE.lang : 'en-GB'; if (VOICE) u.voice = VOICE; u.rate = .85;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+function showPop(btn){
+  const v = VOCAB[btn.dataset.v]; if (!v) return;
+  const p = $('#pop');
+  p.innerHTML = `<div class="pw"><b>${esc(v.w)}</b> <button type="button" class="say" aria-label="Nghe lại">🔊</button></div>
+    <div class="pi">${esc(v.ipa || '')}</div><div class="pv">${esc(v.vi)}</div>`;
+  p.onclick = null;
+  placePop(p, btn.getBoundingClientRect(), 280);
+  $('.say', p).onclick = () => say(v.w);
+  say(v.w);
+}
+// đặt bong bóng cạnh phần tử (trên hoặc dưới, không tràn màn hình)
+function placePop(p, r, maxW){
+  p.hidden = false;
+  const pw = Math.min(maxW, window.innerWidth - 24);
+  p.style.width = pw + 'px';
+  let left = r.left + r.width / 2 - pw / 2 + window.scrollX;
+  left = Math.max(12 + window.scrollX, Math.min(left, window.scrollX + window.innerWidth - pw - 12));
+  p.style.left = left + 'px';
+  const h = p.offsetHeight;
+  const below = r.bottom + 8 + h < window.innerHeight || r.top < h + 16;
+  p.style.top = (below ? r.bottom + 8 : r.top - h - 8) + window.scrollY + 'px';
+}
+const hidePop = () => { const p = $('#pop'); if (p) p.hidden = true; };
+document.addEventListener('click', e => {
+  const b = e.target.closest('.vw');
+  if (b){ e.preventDefault(); e.stopPropagation(); showPop(b); return; }
+  if (!e.target.closest('#pop')) hidePop();
+}, true);
+window.addEventListener('resize', hidePop);
+
+/* ============ CHỖ LÀM BÀI TRONG CÂU ============ */
+// ((a/*b)) chọn · [[x|y]] gõ chữ · [[N:sg/pl]] gõ "a/an + số ít" hoặc "số + số nhiều"
+const TOK = /\(\(([^)]*)\)\)|\[\[([^\]]*)\]\]/g;
+function parseTok(m){
+  if (m[1] != null){
+    const raw = m[1].split('/').map(x => x.trim());
+    const opts = raw.map(x => x.replace(/^\*/, '')), correct = raw.map((x, i) => x.startsWith('*') ? i : -1).filter(i => i >= 0);
+    return { kind: 'ch', opts, correct, need: correct.length };
+  }
+  const g = m[2].trim();
+  if (g.startsWith('N:')){ const [sg, pl] = g.slice(2).split('/').map(x => x.trim()); return { kind: 'noun', sg, pl }; }
+  return { kind: 'gap', alts: g.split('|').map(x => x.trim()).filter(Boolean) };
+}
+const toks = t => Array.from(String(t || '').matchAll(TOK)).map(parseTok);
+
+const NUMW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+const nrm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[’‘`]/g, "'")
+  .replace(/[–—−]/g, '-').replace(/[.,!?;:"]+/g, ' ').replace(/\s+/g, ' ').trim();
+// Bài dịch (trans: true): coi viết tắt = viết đầy đủ (they're = they are, isn't = is not…)
+const nrmT = s => nrm(String(s || '').replace(/[’‘`]/g, "'")
+  .replace(/\bcan't\b/gi, 'can not').replace(/\bcannot\b/gi, 'can not').replace(/\bwon't\b/gi, 'will not').replace(/\bshan't\b/gi, 'shall not')
+  .replace(/n't\b/gi, ' not').replace(/'re\b/gi, ' are').replace(/'m\b/gi, ' am').replace(/'ll\b/gi, ' will').replace(/'ve\b/gi, ' have')
+  .replace(/'s\b(?=\s+(used|getting|going|not|always|very|so|too|a|an|the|been|never|still)\b)/gi, ' is'));
+const vowelStart = w => /^[aeiou]/i.test(w) && !/^(uni|use|eu|one)/i.test(w);
+function lev(a, b){
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+// Ô ghi tên tranh (bài 2): "a lorry" / "an umbrella" / "three lorries" / "3 lorries"
+function nounCheck(ans, sg, pl){
+  const s = nrm(ans); if (!s) return { ok: false, why: 'empty' };
+  const m = s.match(/^(a|an|one|\d+|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(.+)$/);
+  const det = m ? m[1] : '', noun = m ? m[2] : s;
+  const n = !det ? 0 : /^\d+$/.test(det) ? Number(det) : det === 'a' || det === 'an' ? 1 : NUMW[det];
+  const isSg = noun === sg, isPl = noun === pl;
+  if (!isSg && !isPl){
+    const close = [sg, pl].some(w => lev(w, noun) <= Math.max(1, Math.floor(w.length / 4)));
+    return { ok: false, why: close ? 'spell' : 'word' };
+  }
+  if (!det) return { ok: false, why: 'noart' };
+  if (isSg){
+    if (n !== 1) return { ok: false, why: 'needpl' };
+    if (det === 'a' && vowelStart(sg)) return { ok: false, why: 'aan' };
+    if (det === 'an' && !vowelStart(sg)) return { ok: false, why: 'aan' };
+    return { ok: true };
+  }
+  if (n === 1) return { ok: false, why: 'sgpl' };
+  return { ok: true };
+}
+const NOUN_HINT = {
+  empty: 'Em chưa làm câu này.',
+  noart: 'Danh từ đếm được cần có <b>a / an</b> hoặc <b>số đếm</b> (two, three…) đứng trước.',
+  aan: 'Xem lại <b>a</b> hay <b>an</b>: “an” đứng trước từ bắt đầu bằng âm nguyên âm (a, e, i, o, u).',
+  needpl: 'Có số đếm từ 2 trở lên thì danh từ phải ở <b>số nhiều</b>. Nhớ số nhiều đặc biệt (man → ?, woman → ?, shelf → ?).',
+  sgpl: '<b>a / an</b> chỉ đi với danh từ <b>số ít</b>. Muốn dùng số nhiều thì đếm xem có mấy cái.',
+  spell: 'Gần đúng rồi! So lại chính tả với từ trong khung.',
+  word: 'Nhìn kỹ chữ cái trong tranh rồi chọn lại từ trong khung.',
+};
+
+/* ============ ĐIỀU HƯỚNG ============ */
+// Mỗi tuần có thể có nhiều bài (LESSONS[w] là mảng): ?w=1&b=1 (Grammar), ?w=1&b=2 (Vocabulary)…
+const QP = new URLSearchParams(location.search);
+const WEEK_NO = parseInt(QP.get('w'), 10);
+const PART_NO = parseInt(QP.get('b'), 10) || 1;
+// ?w=2&preview: cô xem trước bài chưa mở (học sinh không thấy link này trên trang chủ)
+const PREVIEW = QP.has('preview');
+const lessonsOf = w => [].concat(LESSONS[w] || []);
+// ?sq=<id>: Side quest (video cô làm + câu hỏi), lưu riêng, mail ghi "Side quest"
+const SQ_ID = QP.get('sq');
+const LESSON = SQ_ID ? (SIDEQUESTS.find(x => x.id === SQ_ID && (x.week <= OPEN_WEEK || PREVIEW)) || null)
+  : WEEK_NO && (WEEK_NO <= OPEN_WEEK || PREVIEW) ? lessonsOf(WEEK_NO)[PART_NO - 1] || null : null;
+const myKey = () => SQ_ID ? 'grad-sq-' + SQ_ID : storeKey(WEEK_NO, PART_NO);
+const ME_KEY = 'grad-me';
+const storeKey = (w, b) => 'grad-w' + w + '-' + (b || 1);
+function migrateB2(){} // (B2 có chuyển dữ liệu cũ; Graduation không cần)
+// Từ chép vở của 1 bài: newWords + newWordsAfter (từ là đáp án, chỉ hiện sau khi nộp xong)
+const wordsOf = (L, done) => (L.newWords || []).concat(done ? L.newWordsAfter || [] : []);
+
+// Câu chào trang chủ: mỗi lần mở đổi 1 câu (không lặp lại câu lần trước)
+const HI_LINES = [
+  'Every new word is a new superpower. 💪',
+  'Your brain loves new words. Let’s feed it! 🧠',
+  'Small steps every week = BIG English! 🚀',
+  'Mistakes mean you’re trying. Keep going! 🌱',
+  'You’re getting better every single week. 📈',
+  'Ready for a new adventure? Let’s go! 🎒',
+  'Today’s you is smarter than yesterday’s you. ✨',
+  'Grammar is your secret map. Let’s explore! 🗺️',
+  'Curious minds go far. Let’s explore! 🔭',
+  'One more step towards your FCE certificate. 🎓',
+];
+function hiLine(){
+  let last = lsGet('grad-hi'), i;
+  do { i = Math.floor(Math.random() * HI_LINES.length); } while (HI_LINES.length > 1 && i === last);
+  lsSet('grad-hi', i);
+  return HI_LINES[i];
+}
+// Sao thành tích của 1 bài đã xong: ≥90% → 3 sao, ≥70% → 2 sao, còn lại 1 sao
+function starsOf(s){
+  if (!s || s.phase !== 'done') return 0;
+  const r = s.r2 || s.r1; if (!r || !r.total) return 3;
+  const p = r.score / r.total;
+  return p >= .9 ? 3 : p >= .7 ? 2 : 1;
+}
+/* ============ AVATAR ============ */
+const AVATARS = Array.from({ length: 16 }, (_, i) => 'a' + (i + 1)); // img/ui/av-1…16.webp
+const avHtml = (av, c = 'av') => av === 'char' && window.YumiAvatar && window.YumiAuth && YumiAuth.me() && /^teen:\{/.test(YumiAuth.me().avatar || '')
+    ? `<span class="${c} avchar">${YumiAvatar.html(YumiAuth.me().avatar, { crop: 'head' })}</span>` // nhân vật tủ đồ
+  : /^data:image\//.test(av || '') ? `<img class="${c}" src="${av}" alt="">`
+  : /^a\d+$/.test(av || '') ? `<img class="${c}" src="img/ui/av-${av.slice(1)}.webp" alt="">` : `<span class="${c}">${esc(av || '🙂')}</span>`;
+let AV = '';
+// ảnh trong máy → cắt vuông, thu nhỏ 160px (chỉ lưu trên máy này, không gửi đi)
+function loadAvatarFile(f, done){
+  if (!f || !/^image\//.test(f.type)) return;
+  const r = new FileReader();
+  r.onload = () => { const im = new Image(); im.onload = () => {
+    const s = Math.min(im.width, im.height), c = document.createElement('canvas'); c.width = c.height = 160;
+    c.getContext('2d').drawImage(im, (im.width - s) / 2, (im.height - s) / 2, s, s, 0, 0, 160, 160);
+    done(c.toDataURL('image/jpeg', 0.82)); }; im.src = r.result; };
+  r.readAsDataURL(f);
+}
+function paintAvPick(){
+  $$('#avPick .avb[data-av]').forEach(b => b.classList.toggle('on', b.dataset.av === AV));
+  const up = $('#avUp'); if (up){ up.classList.toggle('on', /^data:/.test(AV)); up.innerHTML = /^data:/.test(AV) ? avHtml(AV, 'avimg') : '📷'; }
+  const pv = $('#avPrev'); if (pv) pv.innerHTML = avHtml(AV, 'av big');
+}
+const starRow = n => [1, 2, 3].map(i => `<span class="${i <= n ? '' : 'off'}">⭐</span>`).join('');
+
+/* ============ TÀI KHOẢN YUMI (đăng nhập + bảng xếp hạng, script chung /yumi-auth.js) ============ */
+// YA = null khi công tắc chung chưa bật (hoặc script chung không tải được) → trang chạy như cũ, gõ tên.
+const YA = window.YumiAuth && YumiAuth.ready() ? YumiAuth : null;
+const YA_OPTS = { mascot: 'img/ui/mascot-1.webp', title: 'FCE Graduation 🎓', sub: 'Log in to start your season 🏆',
+  theme: { bg: 'radial-gradient(900px 520px at 0% -5%,rgba(255,46,136,.28),transparent 60%),radial-gradient(900px 620px at 105% 5%,rgba(34,227,255,.22),transparent 60%),#0b0f1e',
+    card: 'linear-gradient(180deg,#1b2246,#141a33)', text: '#e9edff', acc: '#ff2e88', acc2: '#8f6cf6', ring: 'rgba(34,227,255,.28)',
+    font: 'Nunito,system-ui,sans-serif', head: 'Rajdhani,"Chakra Petch",Nunito,system-ui,sans-serif', dark: true } };
+const yaChar = () => { const m = YA && YA.me(); return !!(m && /^teen:\{/.test(m.avatar || '')); }; // đã có nhân vật tủ đồ
+function yaSync(){ // tên + lớp lấy theo tài khoản; có nhân vật thì avatar = nhân vật
+  const m = YA && YA.me(); if (!m) return;
+  lsSet(ME_KEY, Object.assign(lsGet(ME_KEY) || {}, { name: m.fullName || m.name, cls: m.cls }, yaChar() ? { av: 'char' } : {}));
+}
+function yaAvatar(){ // gửi avatar lên bảng xếp hạng (ảnh tự chụp thì không gửi)
+  const a = AV || (lsGet(ME_KEY) || {}).av; if (!YA || !a || /^data:/.test(a) || a === 'char') return;
+  YA.setAvatar(/^a\d+$/.test(a) ? new URL(`img/ui/av-${a.slice(1)}.webp`, location.href).pathname : a);
+}
+function yaHome(){
+  if (!YA) return;
+  const card = $('#app .hi'); if (!card) return;
+  const row = document.createElement('div'); row.className = 'yarow';
+  row.appendChild(YA.trophy({ theme: YA_OPTS.theme }));
+  const out = document.createElement('button'); out.type = 'button'; out.className = 'linkbtn'; out.textContent = 'Log out';
+  out.onclick = () => YA.logout();
+  if (window.YumiAvatar) row.appendChild(YumiAvatar.button({ style: 'teen', theme: YA_OPTS.theme, onSave: () => { yaSync(); renderHome(); } }));
+  row.appendChild(out); card.appendChild(row);
+  yaAvatar();
+  // lần đầu: tạo nhân vật (chỉ đồ miễn phí) → vẽ lại trang chủ với nhân vật, rồi mới hiện bảng xếp hạng
+  const done = () => YA.autoBoard({ theme: YA_OPTS.theme });
+  if (window.YumiAvatar) YumiAvatar.ensure({ style: 'teen', theme: YA_OPTS.theme }).then(v => { if (v) { yaSync(); renderHome(); } else done(); }).catch(done);
+  else done();
+}
+
+function renderHome(){
+  migrateB2();
+  document.title = 'FCE Graduation 🎓';
+  $('#heroSub').textContent = 'Real exam practice · Rank up · Graduate 🎓'; document.body.classList.add('home');
+  const me = lsGet(ME_KEY) || {};
+  const first = (typeof YA !== 'undefined' && YA && YA.me()) ? YA.me().name : String(me.name || '').trim().split(/\s+/).pop(); // đăng nhập → nguyên nickname
+  const d = gameData(), { stars, words, done } = d; // fun.js
+  const lv = 1 + Math.floor(stars / 6), xp = stars % 6;
+  $('#app').innerHTML = `<section class="card hi">
+      <img class="hmas" src="img/ui/mascot-1.webp" alt="">
+      ${me.av ? `<div class="hiav">${avHtml(me.av, 'av big')}</div>` : ''}
+      <h2>Hi ${first ? esc(first) : 'superstar'}! 🌟</h2>
+      ${titleChip(d)}
+      <p class="hiline">${hiLine()}</p>
+      <div class="stats">
+        <div class="stat"><b>⭐ ${stars}</b><span>stars</span></div>
+        <div class="stat"><b>📒 ${words}</b><span>new words</span></div>
+        <div class="stat"><b>🏁 ${done}</b><span>adventures</span></div>
+      </div>
+      ${rankHtml(stars)}
+      ${stars ? '' : '<p class="muted small" style="margin:10px 0 0">Your first stars are waiting for you! ⭐</p>'}
+    </section>
+    ${reviewCard(d)}
+    ${revengeCard()}
+    ${sideQuestCard()}
+    ${mapHtml(d)}
+    ${badgesHtml(d)}`;
+  afterHome();
+  yaHome();
+}
+
+/* ============ DANH SÁCH CÂU HỎI ============ */
+// Mỗi chỗ trống = 1 câu chấm điểm. k = "<bài>-<câu><a,b…>"
+let QS = [];
+function itemsOfEx(e){
+  if (e.type === 'speak') return [];
+  if (e.type === 'text') return e.paras.map((p, j) => Object.assign({ n: 'p' + (j + 1) }, p));
+  if (e.type !== 'label') return e.items.map((it, j) => Object.assign({ n: String(j + 1) }, it));
+  const out = [];
+  e.groups.forEach(g => {
+    if (/\[\[/.test(g.head)) out.push({ n: g.n, t: g.head, h: g.h, head: true, grp: g.n });
+    g.rows.forEach(r => { if (r.t) out.push({ n: g.n + r.l, t: r.t, h: r.h, grp: g.n }); });
+  });
+  return out;
+}
+function buildQS(){
+  QS = [];
+  LESSON.ex.forEach(e => { let c = 0; itemsOfEx(e).forEach(it => {
+    const ts = toks(it.t);
+    ts.forEach((tok, ti) => {
+      // bài đoạn văn: đánh số chỗ trống liên tục 1, 2, 3…
+      const label = e.type === 'text' ? String(++c) : it.n + (ts.length > 1 ? 'abcdefgh'[ti] : '');
+      QS.push({ k: e.id + '-' + label, e, it, ti, tok, label, h: Array.isArray(it.h) ? it.h[ti] : it.h });
+    });
+  }); });
+}
+const qOf = k => QS.find(q => q.k === k);
+const tokText = tok => tok.kind === 'ch' ? tok.correct.map(i => tok.opts[i]).join(' + ')
+  : tok.kind === 'noun' ? `${vowelStart(tok.sg) ? 'an' : 'a'} ${tok.sg} / (số đếm) ${tok.pl}` : tok.alts[0];
+const correctText = q => { const c = tokText(q.tok); return q.tok.kind === 'ch' ? unv(c).replace(/^–$/, '– (không mạo từ)') : c; };
+// Câu hỏi dạng chữ (cho mail): chỗ đang hỏi = ___ hoặc (lựa chọn), chỗ khác = …
+function qText(q){
+  if (q.it.vi) return 'Dịch: ' + q.it.vi;
+  const e = q.e, lines = String(q.it.t).split(/<br\s*\/?>/i);
+  let i = -1, pick = '';
+  const marked = lines.map(line => line.replace(TOK, m0 => {
+    i++;
+    if (i !== q.ti) return '…';
+    const m = [...m0.matchAll(TOK)][0], tk = parseTok(m);
+    return tk.kind === 'ch' && e.type !== 'text' ? '[' + tk.opts.map(unv).join(' / ') + ']' : '___';
+  }));
+  pick = marked.find(l => /___|\[/.test(l)) || marked.join(' ');
+  // đoạn văn dài: chỉ lấy câu có chỗ trống
+  // (chỗ trống đứng đầu câu, như Reading Part 6: lấy thêm câu trước cho dễ hiểu)
+  if (e.type === 'text'){
+    const ss = plain(pick).split(/(?<=[.!?:’])\s+/), j = ss.findIndex(x => /___/.test(x));
+    if (j >= 0) pick = (j > 0 && /^___/.test(ss[j]) ? ss[j - 1] + ' ' : '') + ss[j];
+  }
+  const pre = e.type === 'label' ? `Picture ${q.it.grp}${q.it.head ? ' – topic' : ' – ' + q.it.n.slice(-1)}: ` : e.type === 'pics' ? 'Picture: ' : '';
+  return pre + plain(pick) + (q.it.v ? ' (' + plain(q.it.v) + ')' : '');
+}
+
+/* ============ TRẠNG THÁI BÀI ============ */
+let S = null;
+// phase: work → (Submit) review: xem đúng/sai, khoá hết → (Làm lại câu sai) retry: chỉ hiện câu sai + gợi ý → (Nộp lần 2) done
+const blank = () => ({ name: '', cls: '', startedAt: null, leaves: 0, a: {}, tick: {}, rec: {}, phase: 'work', r1: null, r2: null, sid: '', sent1: false, sent2: false, retryAt: null });
+const save = () => lsSet(myKey(), S);
+
+/* ============ GHI ÂM (giống KET; lưu IndexedDB để không mất khi đóng trang) ============ */
+// RECS = các ô ghi âm của bài: đọc to (1 file/bài) và bài nói (1 file/câu)
+let RECS = [];
+function buildRecs(){
+  RECS = [];
+  LESSON.ex.forEach(e => {
+    if (e.readAloud) RECS.push({ qk: e.id + '-ra', e, kind: 'ra', max: 150, code: 'Ex' + exNo(e), label: `Exercise ${exNo(e)} – Read aloud` });
+    if (e.type === 'speak') e.prompts.forEach((p, j) => RECS.push({ qk: e.id + '-' + (j + 1), e, j, kind: 'sp', max: 60,
+      code: 'Ex' + exNo(e) + '-' + (j + 1), label: `Exercise ${exNo(e)} – ${j + 1}. ${plain(p.lead)}` }));
+  });
+}
+const fmtSec = s => { s = Math.max(0, Math.round(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+let IDBP = null;
+function idb(){
+  if (!IDBP) IDBP = new Promise((res, rej) => {
+    if (!window.indexedDB) return rej(new Error('no indexedDB'));
+    const r = indexedDB.open('grad-adventure', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('rec');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return IDBP;
+}
+const within = (p, ms = 4000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+async function idbPut(k, v){ const d = await idb(); return new Promise((res, rej) => { const t = d.transaction('rec', 'readwrite'); t.objectStore('rec').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); }); }
+async function idbGet(k){ const d = await idb(); return new Promise((res, rej) => { const q = d.transaction('rec').objectStore('rec').get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => rej(q.error); }); }
+const RECBLOB = {};
+const recId = qk => (SQ_ID ? 'sq' + SQ_ID : 'w' + WEEK_NO + '-' + PART_NO) + '-' + qk;
+async function storeRec(qk, blob){ RECBLOB[qk] = blob; try { await within(blob.arrayBuffer().then(buf => idbPut(recId(qk), { buf, type: blob.type }))); } catch (e) {} }
+async function loadRec(qk){
+  if (RECBLOB[qk]) return RECBLOB[qk];
+  try { const v = await within(idbGet(recId(qk))); if (v && v.buf) return (RECBLOB[qk] = new Blob([v.buf], { type: v.type || 'audio/webm' })); } catch (e) {}
+  return null;
+}
+const extOf = t => /mp4|aac|m4a/.test(t) ? 'm4a' : /ogg/.test(t) ? 'ogg' : /wav/.test(t) ? 'wav' : 'webm';
+function pickMime(){
+  const c = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
+  if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+  return c.find(m => MediaRecorder.isTypeSupported(m)) || '';
+}
+function stopAllAudio(){ $$('audio').forEach(a => { try { a.pause(); } catch (e) {} }); try { speechSynthesis.cancel(); } catch (e) {} }
+document.addEventListener('play', ev => $$('audio').forEach(a => { if (a !== ev.target) a.pause(); }), true);
+let REC = null, recMsg = {};
+async function recStart(qk){
+  if (REC || S.phase !== 'work') return;
+  const sl = RECS.find(x => x.qk === qk); if (!sl) return;
+  stopAllAudio(); recMsg[qk] = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder){
+    recMsg[qk] = 'Trình duyệt này không ghi âm được. Hãy mở trang bằng Chrome (Android, máy tính) hoặc Safari (iPhone, iPad).'; paintRec(); return;
+  }
+  let stream;
+  muteAway = true; // hộp xin quyền micro không tính là rời trang
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (e){
+    releaseAway();
+    const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+    recMsg[qk] = denied ? 'Micro đang bị chặn. Bấm biểu tượng 🔒 cạnh địa chỉ trang, cho phép Micro rồi thử lại.' : 'Không tìm thấy micro. Kiểm tra micro hoặc tai nghe rồi thử lại.';
+    paintRec(); return;
+  }
+  releaseAway();
+  if (REC){ stream.getTracks().forEach(t => t.stop()); return; }
+  const mime = pickMime(); let mr;
+  try { mr = new MediaRecorder(stream, Object.assign({ audioBitsPerSecond: 48000 }, mime ? { mimeType: mime } : {})); } catch (e){ mr = new MediaRecorder(stream); }
+  const r = { qk, mr, stream, chunks: [], t0: Date.now(), max: sl.max };
+  REC = r;
+  mr.ondataavailable = e => { if (e.data && e.data.size) r.chunks.push(e.data); };
+  mr.onstop = () => recDone(r);
+  mr.start(1000);
+  r.timer = setInterval(() => {
+    const s = (Date.now() - r.t0) / 1000, tm = $('#rt-' + qk);
+    if (tm) tm.textContent = fmtSec(s);
+    if (s >= r.max) recStop();
+  }, 250);
+  paintRec();
+}
+function recStop(){ if (REC && REC.mr.state !== 'inactive') REC.mr.stop(); }
+async function recDone(r){
+  clearInterval(r.timer);
+  try { r.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  if (REC === r) REC = null;
+  const type = r.mr.mimeType || (r.chunks[0] && r.chunks[0].type) || 'audio/webm';
+  const dur = Math.min(r.max, (Date.now() - r.t0) / 1000);
+  const blob = new Blob(r.chunks, { type });
+  if (blob.size < 500 || dur < 1){ recMsg[r.qk] = 'Bản ghi ngắn quá. Em ghi lại nhé.'; paintRec(); return; }
+  S.rec[r.qk] = { mime: type.split(';')[0], ext: extOf(type), dur: Math.round(dur), size: blob.size, at: Date.now() };
+  save();
+  await storeRec(r.qk, blob);
+  paintRec(); progress();
+}
+function paintRec(){
+  RECS.forEach(sl => {
+    const box = $('#sq-' + sl.qk); if (!box) return;
+    const r = S.rec[sl.qk], recording = REC && REC.qk === sl.qk, lock = S.phase !== 'work';
+    box.className = 'sq' + (r ? ' done' : '') + (recording ? ' live' : '');
+    box.innerHTML = `<div class="sqr">
+        ${recording ? `<span class="dot"></span><b id="rt-${sl.qk}">0:00</b><span class="muted small">/ ${fmtSec(sl.max)}</span><button type="button" class="btn sm red" data-stop="1">⏹ Stop</button>`
+          : lock ? '' : `<button type="button" class="btn sm ${r ? 'ghost' : 'orange'}" data-rec="${sl.qk}" ${REC ? 'disabled' : ''}>🎙 ${r ? 'Record again' : 'Record'}</button>`}
+        ${r && !recording ? `<audio controls preload="none" id="pb-${sl.qk}"></audio>` : ''}
+        <span class="sqs-st">${r && !recording ? '✅ ' + fmtSec(r.dur) : recording ? '' : '<span class="muted small">🎙 not recorded yet</span>'}</span>
+      </div>${recMsg[sl.qk] ? `<div class="err">${esc(recMsg[sl.qk])}</div>` : ''}`;
+    if (r && !recording) loadRec(sl.qk).then(b => {
+      const a = $('#pb-' + sl.qk);
+      if (a && b){ a.src = URL.createObjectURL(b); }
+      else if (a && !b){ a.replaceWith(Object.assign(document.createElement('span'), { className: 'err', textContent: '⚠️ Máy không còn bản ghi này, em ghi lại nhé.' })); if (S.phase === 'work'){ delete S.rec[sl.qk]; save(); progress(); } }
+    });
+  });
+}
+function paintTicks(){
+  $$('.tk').forEach(t => {
+    const v = S.tick[t.dataset.tk];
+    $$('.tkb', t).forEach(b => { b.classList.toggle('on', b.dataset.v === v); b.disabled = S.phase !== 'work'; });
+  });
+}
+
+/* ============ DỰNG BÀI ============ */
+const exVocab = {}; // từ mới nằm trong các lựa chọn (không bấm được trong nút) → hiện thành dòng riêng
+function renderT(t, keys, example){
+  const parts = []; let i = 0;
+  const s = String(t || '').replace(TOK, m0 => { parts.push(m0); return '\u0000' + (parts.length - 1) + '\u0000'; });
+  return vt(s).replace(/\u0000(\d+)\u0000/g, (_, n) => {
+    const m = [...parts[n].matchAll(TOK)][0], tok = parseTok(m), k = keys ? keys[i++] : null;
+    const q = k ? qOf(k) : null, num = q && q.e.type === 'text' ? `<sup class="bnum">${q.label}</sup>` : '';
+    if (tok.kind === 'ch'){
+      return `${num}<span class="ch${example ? ' exm' : ''}"${k ? ` data-k="${k}"` : ''}>${tok.opts.map((o, oi) =>
+        `<button type="button" class="opt${example && tok.correct.includes(oi) ? ' on' : ''}" data-i="${oi}"${example ? ' disabled' : ''}>${esc(unv(o))}</button>`).join('<span class="sl">/</span>')}</span>`;
+    }
+    if (example) return `<span class="exv">${esc(tok.kind === 'gap' ? tok.alts[0] : tok.sg)}</span>`;
+    // bài kéo thả: chỗ trống là ô thả (chạm để chọn từ)
+    if (q && q.e.drag) return `${num}<span class="gw"><button type="button" class="slot${q.e.sents ? ' sslot' : ''}" data-k="${k}" aria-label="Gap ${esc(q.label)}"></button></span>`;
+    // ô trống giãn theo đáp án dài nhất (không để chữ bị che)
+    const w = tok.kind === 'gap' ? Math.max(...tok.alts.map(a => a.length)) : 0;
+    const st = w > 7 ? ` style="width:${Math.min(13, w * .62 + 2).toFixed(1)}em"` : '';
+    return `${num}<span class="gw"><input class="txt ${tok.kind === 'noun' ? 'noun' : 'gap'}" data-k="${k}" ${ia}${st} aria-label="Answer ${esc(k)}"></span>`;
+  });
+}
+const keysOf = (e, it) => QS.filter(q => q.e === e && q.it.n === it.n).map(q => q.k);
+const fixBox = (e, it) => `<div class="fix" data-fix="${e.id}-${it.n}"></div>`;
+
+const exNo = e => LESSON.ex.indexOf(e) + 1;
+// Ô Grammar: mặc định ở đầu bài; grammarAfter: N = đặt sau bài tập thứ N (vd. sau phần nghe mở đầu)
+const gramBox = () => `<details class="gram" open><summary>📘 Grammar: ${esc(LESSON.title)}</summary><div class="gbody">${LESSON.grammarImg ? aiImg(LESSON.grammarImg) : ''}${LESSON.grammar}</div></details>`;
+function exHead(e){
+  const ws = [];
+  JSON.stringify(e.examples || []).concat(JSON.stringify(e.items || [])).replace(/\(\(([^)]*)\)\)/g, (_, inner) => {
+    inner.replace(/\{\{([^}|]+)/g, (__, k) => { if (VOCAB[k] && !ws.includes(k)) ws.push(k); });
+  });
+  return `<div class="ex-head"><span class="badge">Exercise ${exNo(e)}</span><h2>${e.title}</h2></div>
+    ${e.track ? `<div class="listen"><audio controls preload="none" src="audio/${e.track}.mp3"></audio></div>` : ''}
+    <p class="how">${vt(e.how)}</p>
+    ${e.tip ? `<p class="tip">💡 ${e.tip}</p>` : ''}
+    ${ws.length ? `<div class="words"><span class="wl">📒 Words in the options:</span> ${ws.map(w => vt(`{{${w}}}`)).join(' ')}</div>` : ''}
+    ${e.ai ? aiImg(e.ai) : ''}
+    ${e.box && e.type !== 'label' && !e.drag && !e.side ? `<div class="wordbox">${e.box.map(w => w.startsWith('~') ? `<s>${unv(w.slice(1))}</s>` : `<span>${vt(w)}</span>`).join('')}</div>` : ''}
+    ${e.img ? `<img class="eximg" src="img/${e.img}" alt="" loading="lazy">` : ''}
+    ${e.sents && !e.drag ? `<div class="sents">${e.sents.map((s, j) => `<div class="sent"><b>${'ABCDEFGH'[j]}</b><span>${vt(s)}</span></div>`).join('')}</div>` : ''}
+`;
+}
+// Hình minh hoạ tạo bằng ChatGPT: img/ai/<tên>.jpg – chưa có file thì tự ẩn
+const aiImg = n => `<img class="aiimg" src="img/ai/${n}.jpg" alt="" loading="lazy" onerror="this.remove()">`;
+
+/* ============ KÉO THẢ / CHẠM ĐỂ ĐIỀN (bài drag: true) ============ */
+const LET = 'ABCDEFGH';
+// thẻ từ: từ trong khung (bỏ từ ~ ở ví dụ) hoặc câu A–G
+const chipsOf = e => e.sents ? e.sents.map((s, j) => ({ w: LET[j], s }))
+  : e.box.filter(w => !w.startsWith('~')).map(w => ({ w: unv(w), key: (w.match(/^\{\{([^}|]+)/) || [])[1] }));
+function bankOf(e){
+  return `<div class="bank${e.sents ? ' sbank' : ''}" data-bank="${e.id}">
+    <div class="bank-h">👆 Drag ${e.sents ? 'a sentence' : 'a word'} into a gap<span class="bh2"> – or tap it, then tap a gap</span>.</div>
+    <div class="chips">${chipsOf(e).map(c => e.sents
+      ? `<div class="chip schip" data-ex="${e.id}" data-w="${c.w}" role="button" tabindex="0"><span class="grip" aria-hidden="true">⠿</span><b class="cl">${c.w}</b><span>${vt(c.s)}</span></div>`
+      : `<div class="chip" data-ex="${e.id}" data-w="${esc(c.w)}" role="button" tabindex="0">${esc(c.w)}${c.key && VOCAB[c.key] ? `<button type="button" class="vw vq" data-v="${esc(c.key)}" aria-label="Meaning">?</button>` : ''}</div>`).join('')}</div>
+  </div>`;
+}
+// khung từ đứng cạnh bài (side: true) – chỉ để nhìn, học sinh vẫn tự gõ
+const sideBox = e => `<div class="bank sidebox"><div class="bank-h">📦 Words in the box</div><div class="wordbox">${e.box.map(w => w.startsWith('~') ? `<s>${unv(w.slice(1))}</s>` : `<span>${vt(w)}</span>`).join('')}</div></div>`;
+let SEL = null; // thẻ đang chọn: { ex, w }
+const slotOpen = k => !!S && (S.phase === 'work' || (S.phase === 'retry' && S.r1 && !S.r1.items[k].ok));
+const slotHtml = (e, v) => !v ? `<span class="sph">${e.sents ? 'Drop a sentence here' : '&nbsp;'}</span>`
+  : e.sents ? `<b class="cl">${esc(v)}</b><span>${esc(plain(e.sents[LET.indexOf(v)] || ''))}</span>` : esc(v);
+function paintSlots(){
+  $$('.slot').forEach(b => {
+    const q = qOf(b.dataset.k); if (!q) return;
+    const v = String(S.a[q.k] || '');
+    b.innerHTML = slotHtml(q.e, v);
+    b.classList.toggle('filled', !!v);
+    b.disabled = !slotOpen(q.k);
+    b.classList.toggle('target', !!SEL && SEL.ex === q.e.id && !b.disabled);
+  });
+  $$('.chip').forEach(c => {
+    const e = LESSON.ex.find(x => x.id === c.dataset.ex);
+    c.classList.toggle('used', QS.some(q => q.e === e && String(S.a[q.k] || '') === c.dataset.w));
+    c.classList.toggle('sel', !!SEL && SEL.ex === c.dataset.ex && SEL.w === c.dataset.w);
+    c.classList.toggle('off', !(S.phase === 'work' || S.phase === 'retry'));
+  });
+}
+function setSlot(k, v){
+  if (!slotOpen(k)) return;
+  if (v) QS.forEach(q => { if (q.k !== k && q.e === qOf(k).e && S.a[q.k] === v && slotOpen(q.k)) S.a[q.k] = ''; }); // 1 thẻ chỉ ở 1 chỗ
+  S.a[k] = v || '';
+  const el = $(`.slot[data-k="${k}"]`); if (el) el.classList.remove('bad', 'ok');
+  save(); paintSlots(); progress(); if (S.phase === 'retry') topProgress();
+  if (v && el){ sfx('pop'); el.classList.remove('popin'); void el.offsetWidth; el.classList.add('popin'); }
+}
+// chạm vào chỗ trống (chưa chọn thẻ) → bảng chọn
+function openPicker(slot){
+  const q = qOf(slot.dataset.k), e = q.e, cur = String(S.a[q.k] || '');
+  const used = new Set(QS.filter(x => x.e === e && x.k !== q.k).map(x => String(S.a[x.k] || '')));
+  const p = $('#pop');
+  p.innerHTML = `<div class="pk-h">Choose ${e.sents ? 'a sentence' : 'a word'}:</div><div class="pks">${chipsOf(e).map(c =>
+    `<button type="button" class="pk${c.w === cur ? ' on' : ''}${used.has(c.w) ? ' used' : ''}${e.sents ? ' spk' : ''}" data-w="${esc(c.w)}">${e.sents ? `<b class="cl">${c.w}</b> ${esc(plain(c.s))}` : esc(c.w)}</button>`).join('')}</div>
+    ${cur ? '<button type="button" class="pk clr" data-w="">✖ Clear</button>' : ''}`;
+  placePop(p, slot.getBoundingClientRect(), e.sents ? 420 : 300);
+  p.onclick = ev => { const b = ev.target.closest('.pk'); if (!b) return; setSlot(q.k, b.dataset.w); hidePop(); };
+}
+// kéo thả bằng pointer (chuột + cảm ứng). Câu A–G trên điện thoại: kéo bằng nút ⠿
+let DRAG = null, dragAt = 0;
+document.addEventListener('pointerdown', ev => {
+  const chip = ev.target.closest('.chip');
+  if (!chip || ev.target.closest('.vw') || !S || !(S.phase === 'work' || S.phase === 'retry')) return;
+  if (chip.classList.contains('schip') && ev.pointerType !== 'mouse' && !ev.target.closest('.grip')) return;
+  DRAG = { chip, id: ev.pointerId, x: ev.clientX, y: ev.clientY, on: false, vy: 0 };
+});
+function dragTick(){
+  if (!DRAG || !DRAG.on) return;
+  if (DRAG.vy) window.scrollBy(0, DRAG.vy);
+  requestAnimationFrame(dragTick);
+}
+document.addEventListener('pointermove', ev => {
+  if (!DRAG || ev.pointerId !== DRAG.id) return;
+  if (!DRAG.on){
+    if (Math.hypot(ev.clientX - DRAG.x, ev.clientY - DRAG.y) < 8) return;
+    DRAG.on = true; hidePop();
+    const g = DRAG.ghost = document.createElement('div');
+    g.className = 'ghost'; g.textContent = DRAG.chip.classList.contains('schip') ? DRAG.chip.dataset.w + ' · ' + plain(DRAG.chip.textContent.replace(/^⠿\s*[A-H]/, '')).slice(0, 40) + '…' : DRAG.chip.dataset.w;
+    document.body.appendChild(g); document.body.classList.add('dragging');
+    requestAnimationFrame(dragTick);
+  }
+  ev.preventDefault();
+  DRAG.ghost.style.left = ev.clientX + 'px'; DRAG.ghost.style.top = ev.clientY + 'px';
+  DRAG.vy = ev.clientY < 80 ? -14 : ev.clientY > window.innerHeight - 80 ? 14 : 0;
+  const over = (document.elementFromPoint(ev.clientX, ev.clientY) || document.body).closest('.slot');
+  $$('.slot.over').forEach(s => { if (s !== over) s.classList.remove('over'); });
+  if (over && !over.disabled && qOf(over.dataset.k).e.id === DRAG.chip.dataset.ex) over.classList.add('over');
+}, { passive: false });
+function dragEnd(ev, drop){
+  if (!DRAG || ev.pointerId !== DRAG.id) return;
+  const d = DRAG; DRAG = null;
+  if (!d.on) return;
+  d.ghost.remove(); document.body.classList.remove('dragging'); dragAt = Date.now();
+  const over = $('.slot.over'); $$('.slot.over').forEach(s => s.classList.remove('over'));
+  if (drop && over){ SEL = null; setSlot(over.dataset.k, d.chip.dataset.w); }
+}
+document.addEventListener('pointerup', ev => dragEnd(ev, true));
+document.addEventListener('pointercancel', ev => dragEnd(ev, false));
+// nút ✓/✗ (ý kiến riêng, không chấm điểm)
+const tickBtns = k => `<span class="tk" data-tk="${k}"><button type="button" class="tkb" data-v="y" aria-label="Important">✓</button><button type="button" class="tkb" data-v="n" aria-label="Not important">✗</button></span>`;
+const exBody = e => e.type === 'label' ? exLabel(e) : e.type === 'pics' ? exPics(e) : e.type === 'text' ? exText(e) : e.type === 'speak' ? exSpeak(e) : exList(e);
+function exList(e){
+  const nx = (e.examples || []).length, pic = j => e.pics && e.pics[j] ? `<img class="itpic" src="img/ai/${e.pics[j]}.jpg" alt="" loading="lazy">` : '';
+  const ex = (e.examples || []).map((t, j) => `<div class="it example${e.conv ? ' conv' : ''}${e.pics ? ' haspic' : ''}"><span class="cn">▶</span>${pic(j)}<div class="itb">${renderT(t, null, true)}${e.tick ? tickBtns(e.id + '-ex' + (j || '')) : ''}</div></div>`).join('');
+  return `<div class="items">${ex}${itemsOfEx(e).map(it => `<div class="it${e.conv ? ' conv' : ''}${e.pics ? ' haspic' : ''}" data-item="${e.id}-${it.n}">
+      <span class="cn">${it.n}</span>${pic(nx + Number(it.n) - 1)}<div class="itb">${it.vi ? `<div class="tvi">${esc(it.vi)}</div>${it.ph ? `<div class="tph">💬 ${it.ph}</div>` : ''}` : ''}${renderT(it.t, keysOf(e, it))}${it.v ? ` <span class="vb">(${vt(it.v)})</span>` : ''}${e.tick ? tickBtns(e.id + '-' + it.n) : ''}${fixBox(e, it)}</div></div>`).join('')}</div>
+    ${e.readAloud ? `<div class="recbox"><h3>🎙 Read aloud</h3><p class="how">Now read all the sentences above aloud (with your answers) and record yourself.</p>
+      <div class="sq" id="sq-${e.id}-ra"></div></div>` : ''}`;
+}
+// đoạn văn có chỗ trống đánh số
+function exText(e){
+  return `<div class="ptext">${itemsOfEx(e).map(it => `<p class="para" data-item="${e.id}-${it.n}">${renderT(it.t, keysOf(e, it))}</p>${fixBox(e, it)}`).join('')}</div>`;
+}
+// nói về bản thân: mỗi câu 1 ô ghi âm
+function exSpeak(e){
+  return `<div class="sqs">${e.prompts.map((p, j) => `<div class="spq"><div class="spl"><span class="cn">${j + 1}</span> <b>${vt(p.lead)}</b></div>
+      <div class="spm">💬 e.g. <i>${vt(p.ex)}</i></div><div class="sq" id="sq-${e.id}-${j + 1}"></div></div>`).join('')}</div>`;
+}
+function exPics(e){
+  const card = (it, ex) => `<div class="pc${ex ? ' example' : ''}"${ex ? '' : ` data-item="${e.id}-${it.n}"`}>
+      <img src="img/${it.img}" alt="" loading="lazy">
+      <div class="pct"><span class="cn">${ex ? '▶' : it.n}</span> ${renderT(it.t, ex ? null : keysOf(e, it), ex)}</div>${ex ? '' : fixBox(e, it)}</div>`;
+  return `<div class="picgrid">${(e.examples || []).map(it => card(it, true)).join('')}${itemsOfEx(e).map(it => card(it)).join('')}</div>`;
+}
+function exLabel(e){
+  const its = itemsOfEx(e);
+  return `<div class="wordbox">${e.box.map(w => w.startsWith('~') ? `<s>${vt(w.slice(1))}</s>` : `<span>${vt(w)}</span>`).join('')}</div>
+    <div class="lgroups">${e.groups.map(g => {
+      const head = its.find(it => it.grp === g.n && it.head);
+      return `<div class="lg" data-grp="${e.id}-${g.n}"><img src="img/${g.img}" alt="Picture ${g.n}" loading="lazy">
+        <div class="lrows">
+          <div class="lr lhead"${head ? ` data-item="${e.id}-${head.n}"` : ''}><span class="cn">${g.n}</span>${head ? renderT(head.t, keysOf(e, head)) : `<span class="exv">${esc(g.head)}</span>`}${head ? fixBox(e, head) : ''}</div>
+          ${g.rows.map(r => {
+            const it = its.find(x => x.n === g.n + r.l);
+            return `<div class="lr"${it ? ` data-item="${e.id}-${it.n}"` : ''}><span class="ll">${r.l}</span>${it ? renderT(it.t, keysOf(e, it)) + fixBox(e, it) : `<span class="exv">${esc(r.ex)}</span>`}</div>`;
+          }).join('')}
+        </div></div>`;
+    }).join('')}</div>`;
+}
+
+const vRow = k => `<div class="vi">${vt('{{' + k + '}}')}<span class="vipa">${esc(VOCAB[k].ipa)}</span><span class="vmean">${esc(VOCAB[k].vi)}</span></div>`;
+// Từ là đáp án (newWordsAfter): chỉ hiện trong ô New words sau khi nộp xong
+function paintAfterWords(){
+  const box = $('#afterWords'); if (!box) return;
+  const ws = (LESSON.newWordsAfter || []).filter(k => VOCAB[k]);
+  box.innerHTML = S.phase === 'done' && ws.length ? `<h3 class="aw">🔓 More new words from your answers</h3><div class="vgrid">${ws.map(vRow).join('')}</div>` : '';
+}
+function buildLesson(){
+  document.title = 'FCE ' + LESSON.code + ' · ' + LESSON.title;
+  $('#heroSub').textContent = SQ_ID ? `🎬 Side quest · ${LESSON.title}` : `Stage ${WEEK_NO} · ${LESSON.code} · ${LESSON.title}`;
+  buildQS(); buildRecs();
+  const allWords = (LESSON.newWords || []).filter(k => VOCAB[k]);
+  $('#app').innerHTML = `
+    <section class="card start" id="start">
+      <h2>👋 Hi! What’s your name?</h2>
+      <p class="muted" style="margin:0">Điền tên và lớp rồi bấm <b>Start</b>.</p>
+      <div class="field"><label for="inName">Full name</label><input id="inName" autocomplete="name" placeholder="e.g. Nguyễn Minh Anh"></div>
+      <div class="field"><label for="inCls">Class</label><input id="inCls" placeholder="e.g. GRAD-01"></div>
+      <div class="field"><label>Choose your avatar</label>
+        <div class="avrow"><div id="avPrev" class="avprev"></div><div class="avpick" id="avPick">${AVATARS.map(x => `<button type="button" class="avb" data-av="${x}">${avHtml(x, 'avimg')}</button>`).join('')}<button type="button" class="avb avup" id="avUp" title="Ảnh trong máy">📷</button><input type="file" id="avFile" accept="image/*" hidden></div></div>
+        <div class="muted small">📷 = chọn ảnh trong máy của em</div></div>
+      <div class="err" id="startErr"></div>
+      <button class="btn" id="startBtn" type="button">Start →</button>
+    </section>
+    <div id="work" hidden>
+      <div class="topbar" id="topbar" hidden></div>
+      <div id="summaryBox"></div>
+      <div class="card who" id="whoBar"></div>
+      <section class="card guide">
+        ${LESSON.video ? sqVideo(LESSON) : ''}
+        ${allWords.length ? `<h2>📒 New words</h2>
+        <div class="note">${LESSON.copy === false ? '📖 Học kĩ các từ này trước khi làm bài nha! Chạm vào từ để nghe đọc.' : '✍️ Chép từ mới vào vở nha! Chạm vào từ màu vàng để xem nghĩa.'}</div>
+        ${LESSON.wordsImg ? aiImg(LESSON.wordsImg) : ''}
+        <div class="vgrid">${allWords.map(vRow).join('')}</div>
+        <div id="afterWords"></div>`
+        : `<h2>📘 ${esc(LESSON.title)}</h2>
+        <div class="note">💡 Chưa biết từ nào thì chạm vào từ màu vàng để xem nghĩa.</div>`}
+        ${LESSON.grammar && !LESSON.grammarAfter ? gramBox() : ''}
+      </section>
+      ${LESSON.ex.map((e, i) => `${LESSON.grammarAfter && i === LESSON.grammarAfter ? `<section class="card gramcard">${gramBox()}</section>` : ''}${e.part ? `<h2 class="part">${e.part}</h2>` : ''}<section class="card ex${e.stack ? ' stack' : ''}${e.trans ? ' trans' : ''}" id="ex${e.id}">${exHead(e)}${e.drag || e.side
+        ? `<div class="dz${e.sents ? ' dzs' : ''}${e.side ? ' dzw' : ''}"><div class="dz-work">${exBody(e)}</div><aside class="dz-side">${e.drag ? bankOf(e) : sideBox(e)}</aside></div>` : exBody(e)}</section>`).join('')}
+    </div>`;
+
+  // gõ chữ
+  $$('input.txt').forEach(el => {
+    el.value = S.a[el.dataset.k] || '';
+    el.addEventListener('input', () => {
+      if (el.disabled || S.phase === 'done' || S.phase === 'review') return;
+      S.a[el.dataset.k] = el.value; if (S.phase === 'retry'){ el.classList.remove('bad'); topProgress(); }
+      save(); progress();
+    });
+    // Enter → nhảy sang ô tiếp theo
+    el.addEventListener('keydown', ev => {
+      if (ev.key !== 'Enter') return; ev.preventDefault();
+      const all = $$('input.txt').filter(x => !x.disabled && x.offsetParent !== null), i = all.indexOf(el);
+      if (all[i + 1]) all[i + 1].focus(); else el.blur();
+    });
+  });
+  // chạm lựa chọn
+  $('#app').addEventListener('click', ev => {
+    // kéo thả: chạm thẻ từ → chọn; chạm chỗ trống → đặt thẻ đang chọn, hoặc mở bảng chọn
+    const chip = ev.target.closest('.chip');
+    if (chip){
+      if (Date.now() - dragAt < 400 || !(S.phase === 'work' || S.phase === 'retry')) return;
+      SEL = SEL && SEL.ex === chip.dataset.ex && SEL.w === chip.dataset.w ? null : { ex: chip.dataset.ex, w: chip.dataset.w };
+      paintSlots(); return;
+    }
+    const slot = ev.target.closest('.slot');
+    if (slot){
+      if (slot.disabled || Date.now() - dragAt < 400) return;
+      const q = qOf(slot.dataset.k);
+      if (SEL && SEL.ex === q.e.id){ const w = SEL.w; SEL = null; setSlot(q.k, w); }
+      else openPicker(slot);
+      return;
+    }
+    // ✓/✗ (không chấm điểm)
+    const tb = ev.target.closest('.tkb');
+    if (tb && !tb.disabled && S.phase === 'work'){
+      const k = tb.closest('.tk').dataset.tk;
+      S.tick[k] = S.tick[k] === tb.dataset.v ? undefined : tb.dataset.v; save(); paintTicks(); progress(); return;
+    }
+    // ghi âm
+    const rc = ev.target.closest('[data-rec]'); if (rc){ recStart(rc.dataset.rec); return; }
+    if (ev.target.closest('[data-stop]')){ recStop(); return; }
+    const b = ev.target.closest('.ch[data-k] .opt'); if (!b || b.disabled) return;
+    const k = b.closest('.ch').dataset.k, q = qOf(k), i = Number(b.dataset.i);
+    if (!(S.phase === 'work' || (S.phase === 'retry' && !S.r1.items[k].ok))) return;
+    let cur = Array.isArray(S.a[k]) ? S.a[k].slice() : [];
+    if (q.tok.need <= 1) cur = cur[0] === i ? [] : [i];
+    else if (cur.includes(i)) cur = cur.filter(x => x !== i);
+    else { cur.push(i); if (cur.length > q.tok.need) cur.shift(); }
+    S.a[k] = cur; save(); paintChoices(); sfx("tick"); progress(); if (S.phase === 'retry') topProgress();
+  });
+  const me = lsGet(ME_KEY) || {};
+  $('#inName').value = S.name || me.name || ''; $('#inCls').value = S.cls || me.cls || '';
+  AV = me.av || AVATARS[Math.floor(Math.random() * AVATARS.length)]; paintAvPick();
+  $('#avPick').addEventListener('click', ev => { const b = ev.target.closest('.avb'); if (!b) return;
+    if (b.id === 'avUp'){ $('#avFile').click(); return; } AV = b.dataset.av; paintAvPick(); yaAvatar(); });
+  $('#avFile').addEventListener('change', ev => loadAvatarFile(ev.target.files[0], d => { AV = d; paintAvPick(); }));
+  if (YA && YA.me()){ // đã đăng nhập: tên + lớp theo tài khoản, ẩn 2 ô gõ
+    const m = YA.me();
+    $('#inName').value = m.fullName || m.name; $('#inCls').value = m.cls || '-';
+    ['inName', 'inCls'].forEach(id => { $('#' + id).closest('.field').hidden = true; });
+    $('#start h2').textContent = `👋 Hi ${m.name}!`;
+    $('#start p.muted').innerHTML = 'Choose your avatar and tap <b>Start</b>.';
+    if (yaChar()){ AV = 'char'; const f = $('#avPick') && $('#avPick').closest('.field'); if (f) f.hidden = true; $('#start p.muted').innerHTML = 'Tap <b>Start</b> to begin.'; }
+  }
+  $('#startBtn').addEventListener('click', onStart);
+  ['inName', 'inCls'].forEach(id => $('#' + id).addEventListener('keydown', e => { if (e.key === 'Enter') onStart(); }));
+}
+
+/* ============ TÊN HỌC SINH ============ */
+function onStart(){
+  const n = $('#inName').value.trim(), c = $('#inCls').value.trim();
+  if (n.length < 2){ $('#startErr').textContent = 'Em hãy nhập họ và tên.'; return; }
+  if (!c){ $('#startErr').textContent = 'Em hãy nhập lớp.'; return; }
+  $('#startErr').textContent = '';
+  S.name = n.slice(0, 80); S.cls = c.slice(0, 30);
+  if (!S.startedAt) S.startedAt = new Date().toISOString();
+  save(); lsSet(ME_KEY, { name: S.name, cls: S.cls, av: AV }); yaAvatar();
+  showWork(); window.scrollTo({ top: 0 });
+}
+function renderWho(){
+  const when = S.phase === 'done' ? (S.r2 || S.r1).at : null;
+  $('#whoBar').innerHTML = `<span class="whoname">${avHtml(AV || (lsGet(ME_KEY) || {}).av)} <b>${esc(S.name)}</b> · Class <b>${esc(S.cls)}</b></span>` +
+    (when ? `<span class="muted small">Submitted ${new Date(when).toLocaleString('vi-VN')}</span>`
+      : S.phase === 'work' && !YA ? '<button class="linkbtn" type="button" id="editName">Sửa tên / lớp</button>' : '');
+  const b = $('#editName'); if (b) b.onclick = () => { $('#work').hidden = true; $('#bar').hidden = true; $('#start').hidden = false; $('#inName').focus(); };
+}
+function showWork(){ $('#start').hidden = true; $('#work').hidden = false; $('#bar').hidden = false; renderWho(); progress(); }
+
+/* ============ TIẾN ĐỘ ============ */
+const answered = q => q.tok.kind === 'ch' ? (S.a[q.k] || []).length === q.tok.need : !!String(S.a[q.k] || '').trim();
+function progress(){
+  const bar = $('#bar'); if (!bar) return;
+  bar.hidden = S.phase === 'review' || S.phase === 'retry' || $('#work').hidden; // sau lần 1: nút ở thanh ghim đầu màn hình
+  if (S.phase === 'done'){
+    const R = S.r2 || S.r1;
+    $('#progT').textContent = `Done · ${R.score}/${R.total} correct`;
+    $('#progF').style.width = (R.total ? R.score / R.total * 100 : 100) + '%';
+    $('#submitBtn').hidden = true;
+  } else if (S.phase === 'work'){
+    const ticks = $$('.tk').map(t => t.dataset.tk);
+    const all = QS.length + RECS.length + ticks.length;
+    const d = QS.filter(answered).length + RECS.filter(sl => S.rec[sl.qk]).length + ticks.filter(k => S.tick[k]).length;
+    $('#progT').textContent = `Done ${d}/${all}`;
+    $('#progF').style.width = (all ? d / all * 100 : 0) + '%';
+    $('#submitBtn').textContent = 'Submit ✔'; $('#submitBtn').hidden = false;
+  }
+}
+
+/* ============ CHẤM ĐIỂM ============ */
+const ansText = q => {
+  const v = S.a[q.k];
+  if (q.tok.kind === 'ch') return (Array.isArray(v) ? v.slice().sort((a, b) => a - b) : []).map(i => unv(q.tok.opts[i])).join(' + ');
+  return String(v || '').trim();
+};
+function isOk(q){
+  const v = S.a[q.k];
+  if (q.tok.kind === 'ch'){ const a = (Array.isArray(v) ? v : []).slice().sort((x, y) => x - y); return a.length === q.tok.need && a.every((x, i) => x === q.tok.correct[i]); }
+  if (q.tok.kind === 'noun') return nounCheck(v, q.tok.sg, q.tok.pl).ok;
+  const f = q.e.trans ? nrmT : nrm, y = f(v); return !!y && q.tok.alts.some(a => f(a) === y);
+}
+function gradeNow(){
+  const items = {};
+  QS.forEach(q => { items[q.k] = { ans: ansText(q), v: S.a[q.k] == null ? null : JSON.parse(JSON.stringify(S.a[q.k])), ok: isOk(q) }; });
+  const ks = Object.keys(items);
+  return { items, score: ks.filter(k => items[k].ok).length, total: ks.length };
+}
+
+/* ============ SAU LẦN 1: thanh ghim, chỉ hiện câu sai, gợi ý ============ */
+const wrongKeys = () => S.r1 ? Object.keys(S.r1.items).filter(k => !S.r1.items[k].ok) : [];
+const sameAns = (k) => JSON.stringify(S.a[k] ?? null) === JSON.stringify(S.r1.items[k].v ?? null) || (!S.r1.items[k].v && !ansText(qOf(k)));
+// Gợi ý ngữ pháp, không có đáp án (chỉ hiện lúc làm lại)
+function hintFor(k){
+  const q = qOf(k), r = S.r1.items[k];
+  if (!r.ans) return 'Em chưa làm câu này.';
+  if (q.tok.kind === 'noun') return NOUN_HINT[nounCheck(r.ans, q.tok.sg, q.tok.pl).why] || NOUN_HINT.word;
+  if (q.tok.kind === 'ch' && q.tok.need > 1 && (r.v || []).length !== q.tok.need) return `Nhớ chọn đủ <b>${q.tok.need}</b> từ. ` + (q.h || '');
+  if (q.tok.kind === 'gap' && q.e.only && !q.e.only.includes(nrm(r.ans))) return 'Chỉ gõ 1 trong các từ: <b>' + q.e.only.join(', ') + '</b>. ' + (q.h || '');
+  return q.h || 'Đọc lại ô Grammar ở đầu bài rồi thử lại.';
+}
+function focusWrong(on){
+  document.body.classList.toggle('retrying', !!on);
+  $$('.rt-hide').forEach(x => x.classList.remove('rt-hide'));
+  if (!on) return;
+  const wrongItems = new Set(wrongKeys().map(k => { const q = qOf(k); return q.e.id + '-' + q.it.n; }));
+  $$('section.card.ex').forEach(sec => {
+    const its = $$('[data-item]', sec);
+    if (!its.some(x => wrongItems.has(x.dataset.item))){ sec.classList.add('rt-hide'); return; }
+    its.forEach(x => { if (!wrongItems.has(x.dataset.item)) x.classList.add('rt-hide'); });
+    $$('.example', sec).forEach(x => x.classList.add('rt-hide'));
+    $$('.lg', sec).forEach(g => { if (!$$('[data-item]', g).some(x => wrongItems.has(x.dataset.item))) g.classList.add('rt-hide'); });
+  });
+}
+function renderTop(){
+  const tb = $('#topbar'); if (!tb) return;
+  const stick = () => document.documentElement.style.setProperty('--stick', (tb.hidden ? 12 : tb.offsetHeight + 20) + 'px');
+  if (S.phase !== 'review' && S.phase !== 'retry'){ tb.hidden = true; stick(); return; }
+  tb.hidden = false; requestAnimationFrame(stick);
+  if (S.phase === 'review'){
+    tb.innerHTML = `<div class="tt">Lần 1: ${S.r1.score}/${S.r1.total} · ❌ Sai ${wrongKeys().length} câu</div><button class="btn orange" type="button" id="retryBtn">✏️ Làm lại câu sai</button>`;
+    $('#retryBtn').onclick = startRetry;
+  } else {
+    // nút nộp lần 2 đặt bên TRÁI (khác chỗ nút "Làm lại câu sai" vừa bấm bên phải)
+    tb.innerHTML = `<button class="btn orange" type="button" id="submit2Btn">Nộp lần 2 ✔</button><div class="tt" id="topT"></div>`;
+    $('#submit2Btn').onclick = onSubmit;
+    topProgress();
+  }
+}
+function topProgress(){
+  const el = $('#topT'); if (!el) return;
+  const w = wrongKeys(), fixed = fixedCount();
+  el.textContent = `✏️ Đã sửa ${fixed}/${w.length} câu`;
+  const b = $('#submit2Btn'); if (b) b.classList.toggle('dim', !fixed); // chưa sửa câu nào: nút mờ
+}
+// số câu sai em đã sửa (khác câu trả lời lần 1)
+function fixedCount(){ return wrongKeys().filter(k => !sameAns(k)).length; }
+function startRetry(){
+  S.phase = 'retry'; S.retryAt = new Date().toISOString(); save();
+  paintAll(); window.scrollTo({ top: 0 });
+}
+
+/* ============ HIỂN THỊ KẾT QUẢ ============ */
+function paintChoices(){
+  QS.filter(q => q.tok.kind === 'ch').forEach(q => {
+    const box = $(`.ch[data-k="${q.k}"]`); if (!box) return;
+    const sel = Array.isArray(S.a[q.k]) ? S.a[q.k] : [];
+    const R = S.phase === 'done' ? (S.r2 || S.r1).items[q.k] : S.r1 ? S.r1.items[q.k] : null;
+    const open = S.phase === 'work' || (S.phase === 'retry' && !R.ok);
+    const showMark = S.phase !== 'work' && (S.phase !== 'retry' || R.ok || sameAns(q.k));
+    box.classList.toggle('open', open);
+    $$('.opt', box).forEach(b => {
+      const i = Number(b.dataset.i), on = sel.includes(i);
+      b.disabled = !open;
+      b.classList.toggle('on', on);
+      b.classList.toggle('ok', showMark && on && (S.phase === 'done' ? R.ok || q.tok.correct.includes(i) : R.ok));
+      b.classList.toggle('bad', showMark && on && !(S.phase === 'done' ? R.ok || q.tok.correct.includes(i) : R.ok));
+      b.classList.toggle('right', S.phase === 'done' && !R.ok && q.tok.correct.includes(i) && !on);
+    });
+  });
+}
+function paintMarks(){
+  QS.filter(q => q.tok.kind !== 'ch').forEach(q => {
+    const el = $(`input.txt[data-k="${q.k}"], .slot[data-k="${q.k}"]`); if (!el) return;
+    el.classList.remove('ok', 'bad');
+    const sol = el.parentNode.querySelector('.sol'); if (sol) sol.remove();
+    if (S.phase === 'work'){ el.disabled = false; el.value = S.a[q.k] || ''; return; }
+    if (S.phase === 'review' || S.phase === 'retry'){
+      const r1 = S.r1.items[q.k];
+      el.disabled = r1.ok || S.phase === 'review';
+      if (r1.ok || sameAns(q.k)) el.classList.add(r1.ok ? 'ok' : 'bad');
+      return;
+    }
+    const R = (S.r2 || S.r1).items[q.k];
+    el.value = R.ans || ''; el.disabled = true; el.classList.add(R.ok ? 'ok' : 'bad');
+    if (!R.ok) el.insertAdjacentHTML('afterend', `<span class="sol">→ ${esc(q.tok.kind === 'noun' ? (vowelStart(q.tok.sg) ? 'an ' : 'a ') + q.tok.sg : q.tok.alts[0])}</span>`);
+  });
+  // gợi ý (chỉ lúc làm lại) gom theo câu
+  $$('[data-fix]').forEach(f => { f.innerHTML = ''; });
+  if (S.phase === 'retry'){
+    const by = {};
+    wrongKeys().forEach(k => { const q = qOf(k), id = q.e.id + '-' + q.it.n; (by[id] = by[id] || []).push(q); });
+    Object.entries(by).forEach(([id, qs]) => {
+      const f = $(`[data-fix="${id}"]`); if (!f) return;
+      f.innerHTML = qs.map(q => `<div class="again">💡 ${qs.length > 1 || toks(q.it.t).length > 1 ? `<b>(${q.e.type === 'text' ? q.label : q.ti + 1})</b> ` : ''}${hintFor(q.k)}</div>`).join('');
+    });
+  }
+  // đánh số chỗ trống khi câu có nhiều chỗ và đang làm lại
+  $$('.gw, .ch[data-k]').forEach(w => w.removeAttribute('data-n'));
+  if (S.phase === 'retry') wrongKeys().forEach(k => {
+    const q = qOf(k); if (toks(q.it.t).length < 2 || q.e.type === 'text') return;
+    const el = $(`input.txt[data-k="${k}"]`), w = el ? el.parentNode : $(`.ch[data-k="${k}"]`);
+    if (w) w.setAttribute('data-n', q.ti + 1);
+  });
+  paintSlots();
+}
+// Meme cảm xúc của cô sau lần nộp 1: img/meme/<mức>-<số>.gif. MEMES = số ảnh mỗi mức (thêm ảnh thì tăng số).
+// Chọn ngẫu nhiên, ưu tiên ảnh em chưa gặp ở các bài trước; giữ cố định khi mở lại trang.
+const MEMES = { wow: 7, good: 8, ok: 8, oops: 6 };
+const SEEN_KEY = 'grad-memes-seen';
+function memeOf(R){
+  const pct = R.total ? R.score / R.total : 1;
+  const tier = pct === 1 ? 'wow' : pct >= .8 ? 'good' : pct >= .5 ? 'ok' : 'oops';
+  if (!S.meme || !S.meme.startsWith(tier + '-')){
+    const all = Array.from({ length: MEMES[tier] }, (_, i) => tier + '-' + (i + 1));
+    let seen = lsGet(SEEN_KEY); if (!Array.isArray(seen)) seen = [];
+    let pool = all.filter(m => !seen.includes(m));
+    if (!pool.length){ seen = seen.filter(m => !m.startsWith(tier + '-')); pool = all; }
+    S.meme = pool[Math.floor(Math.random() * pool.length)];
+    seen.push(S.meme); lsSet(SEEN_KEY, seen); save();
+  }
+  return `<img class="meme" src="img/meme/${S.meme}.gif" alt="">`;
+}
+// Lần 1 dưới 70% → câu chọc; lần 2 → câu khen theo số câu đã sửa đúng. Giữ cố định khi mở lại trang.
+function teaseLine1(){
+  const R = S.r1; if (!R || !R.total || R.score / R.total >= .7) return '';
+  if (!S.tease1){ S.tease1 = tease('low1', { s: R.score, t: R.total, w: R.total - R.score }); save(); }
+  return `<div class="tease">${S.tease1}</div>`;
+}
+function praiseLine2(){
+  if (!S.tease2){
+    const ks = Object.keys(S.r1.items).filter(k => !S.r1.items[k].ok);
+    const f = ks.filter(k => S.r2.items[k] && S.r2.items[k].ok).length;
+    S.tease2 = tease(f === ks.length ? 'fixAll' : f ? 'fixSome' : 'fixNone', { f }); save();
+  }
+  return `<div class="tease good">${S.tease2}</div>`;
+}
+function renderSummary(){
+  const box = $('#summaryBox');
+  if (S.phase === 'work'){ box.innerHTML = ''; return; }
+  if (S.phase === 'review' || S.phase === 'retry'){
+    // sau lần 1: chỉ meme + điểm
+    box.innerHTML = `<div class="card summary retry">${memeOf(S.r1)}
+      <div class="sumr"><div class="score">${S.r1.score}<span>/${S.r1.total}</span></div>
+      ${teaseLine1()}
+      <div class="status" id="sendStatus"></div></div></div>`;
+    updateStatus();
+    return;
+  }
+  // xong: điểm + cô đã nhận bài + Let's review (đúng hết ngay lần 1 thì vẫn có meme)
+  const R = S.r2 || S.r1;
+  box.innerHTML = `<div class="card summary">${S.r2 ? '' : memeOf(S.r1)}
+    <div class="sumr"><div class="score">${R.score}<span>/${R.total}</span></div>
+    ${S.r2 ? praiseLine2() : ''}
+    <div class="status" id="sendStatus"></div>
+    ${R.score < R.total ? '<div class="big">Let’s review the answers below 👇</div>' : ''}</div></div>`;
+  updateStatus();
+}
+function paintAll(){ paintAfterWords(); paintMarks(); paintChoices(); paintTicks(); paintRec(); focusWrong(S.phase === 'retry'); renderTop(); renderSummary(); renderWho(); progress(); }
+
+/* ============ CHỐNG NỘP NHẦM + LINK LÀM LẠI CỦA CÔ ============ */
+// Còn trống quá tỉ lệ này thì không cho nộp lần 1; làm chưa đủ số phút này thì chưa cho nộp.
+const MAX_EMPTY = 0.25;
+const MIN_MINUTES = 3;
+// Link cho em làm lại 1 bài đã nộp: link bài đó + &lamlai=yumi-lamlai (mở trên đúng máy em đã làm).
+// Mỗi mã chỉ dùng 1 lần trên mỗi máy; cần làm lại lần nữa thì thêm số: yumi-lamlai2, yumi-lamlai3…
+const RESET_CODE = 'yumi-lamlai';
+const modalOpen = () => { const m = $('#modal'); return !!m && !m.hidden; };
+// Hộp xác nhận trên trang (thay confirm của trình duyệt). yes = nút phụ (Nộp), no = nút chính (Làm tiếp). Không có yes = chỉ thông báo.
+function modal(msg, yes, no){
+  if (!$('#modal')) document.body.insertAdjacentHTML('beforeend', '<div class="modal" id="modal" hidden><div class="mbox" role="dialog" aria-modal="true"><div class="mmsg" id="mMsg"></div><div class="mbtns"><button class="btn lite" type="button" id="mYes"></button><button class="btn" type="button" id="mNo"></button></div></div></div>');
+  return new Promise(res => {
+    const m = $('#modal'), y = $('#mYes'), n = $('#mNo');
+    $('#mMsg').innerHTML = msg;
+    y.hidden = !yes; y.textContent = yes || ''; n.textContent = no;
+    y.disabled = true; setTimeout(() => { y.disabled = false; }, 900); // chạm 2 lần liên tiếp không nộp được
+    const done = v => { m.hidden = true; y.onclick = n.onclick = null; res(v); };
+    y.onclick = () => done(true); n.onclick = () => done(false);
+    m.hidden = false; n.focus();
+  });
+}
+/* ============ CÂU CHỌC / KHEN CỦA CÔ (tiếng Việt, chọn ngẫu nhiên, không lặp câu vừa dùng) ============ */
+const TEASE = {
+  empty: [ // nộp khi còn trống > 25%
+    'Mới làm có <b>{x}/{n}</b> câu mà đã đòi nộp? Bài này đâu phải để ngắm đâu em 😏',
+    'Còn <b>{e} câu</b> trống trơn kìa. Em định để cô làm hộ à? 🙄',
+    'Bỏ trống nhiều thế này thì cô chấm bằng niềm tin à? Làm tiếp đi nào! 💪',
+    'Ơ kìa, mới khởi động thôi mà! Còn <b>{e} câu</b> đang chờ em đấy 👀'],
+  early: [ // nộp khi chưa đủ 3 phút
+    'Mới <b>{m} phút</b> đã xong {n} câu? Thần tốc thế này chắc em là người ngoài hành tinh 👽 Soát lại thêm <b>{r} phút</b> nữa nhé!',
+    'Nhanh thế! Em làm bài hay đang thi speedrun vậy? 😏 Đọc lại kĩ thêm <b>{r} phút</b> rồi hẵng nộp.',
+    'Đọc kĩ đề lại đi người đẹp! 😌 Còn <b>{r} phút</b> nữa mới được nộp.',
+    'Từ từ thôi, còn trẻ mà vội thế em? 😂 Còn <b>{r} phút</b> nữa mới được nộp.'],
+  away: [ // quay lại trang sau hơn 5 lần rời trang
+    'Người yêu nhắn tin hả em? 😏',
+    'Cô thấy hết đó nha! 👀',
+    'Search Google nhiều lần quá rồi đó em! 🔍',
+    'Đi đâu về vậy em? 🙃',
+    'Tự làm bài đi chứ người đẹp! 😌'],
+  low1: [ // điểm lần 1 dưới 70%
+    '{s}/{t}… Điểm này mà khoe với bố mẹ thì hơi run tay đấy 😬 Làm lại câu sai cho cô xem nào!',
+    'Hmm, {s}/{t}. Cô tin em làm được hơn thế nhiều. Hay em đang giấu nghề? 🤔',
+    'Sai tận {w} câu luôn hả? Xem lại ô Grammar rồi phục thù đi em ⚔️',
+    'Điểm này chưa xứng với em đâu. Chứng minh là cô đánh giá sai đi! 😤'],
+  fixAll: [ // lần 2: sửa đúng hết
+    'Sửa sạch bách luôn, đỉnh nóc kịch trần bay phấp phới! 🚀',
+    '10 điểm không có nhưng! Em slay quá trời luôn 💅',
+    'U là trời, keo lỳ ghê! Cô xin phép tự hào về em nha 🥹🏆',
+    'Out trình rồi đó em ơi, xịn xò hết nước chấm! 🔥'],
+  fixSome: [ // lần 2: sửa đúng một phần
+    'Gỡ được {f} câu rồi, căng đét! Mấy câu còn lại để cô cân trên lớp nha 💪',
+    'Có cố gắng là có điểm cộng nha, {f} câu lên xanh rồi đó, real luôn! 🌱',
+    'Không bỏ cuộc là chân ái! {f} câu đã được giải cứu 🦸',
+    'Đang lên level đó nha, tuần sau phải flex nhiều hơn nữa! 📈'],
+  fixNone: [ // lần 2: chưa sửa đúng câu nào
+    'Chưa ăn được câu nào nhưng dám thử lại là chill rồi. Xem đáp án bên dưới để hiểu vì sao nha 👇',
+    'Hơi ét o ét xíu, nhưng em đã không bỏ cuộc 💪 Đọc kĩ đáp án rồi tuần sau làm lại cho cô xem!'],
+  nofix: [ // bấm Nộp lần 2 khi chưa sửa câu nào
+    'Gửi cô 2 bản giống nhau làm giề? 🙄',
+    'Ủa có sửa đâu rồi nộp lần 2 chi? 😏',
+    'Em vừa sinh ra 1 cặp song sinh với điểm số y nguyên 👯'],
+};
+function tease(kind, vars = {}){
+  const list = TEASE[kind], last = lsGet('grad-tease') || {};
+  let i; do { i = Math.floor(Math.random() * list.length); } while (list.length > 1 && i === last[kind]);
+  last[kind] = i; lsSet('grad-tease', last);
+  return list[i].replace(/\{(\w)\}/g, (_, k) => vars[k] !== undefined ? vars[k] : '');
+}
+// dòng nhắc nổi ở đầu màn hình, tự tắt
+function toast(html, ms = 4000){
+  let t = $('#toast');
+  if (!t){ document.body.insertAdjacentHTML('beforeend', '<div class="toast" id="toast" role="status" hidden></div>'); t = $('#toast'); }
+  t.innerHTML = html; t.hidden = false; t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
+  clearTimeout(toast.tm); toast.tm = setTimeout(() => { t.hidden = true; }, ms);
+}
+// Lần 1: chặn khi làm quá ít / quá nhanh, rồi hỏi lại
+async function guard1(left, total){
+  if (modalOpen()) return false;
+  if (left > total * MAX_EMPTY){
+    await modal(`📝 ${tease('empty', { x: total - left, n: total, e: left })}`, '', 'Dạ, em làm tiếp 😅');
+    return false;
+  }
+  const mins = S.startedAt ? (Date.now() - new Date(S.startedAt)) / 60000 : MIN_MINUTES;
+  if (mins < MIN_MINUTES){
+    await modal(`⏱️ ${tease('early', { m: Math.max(1, Math.floor(mins)), n: total, r: Math.ceil(MIN_MINUTES - mins) })}`, '', 'Dạ, em soát lại 🧐');
+    return false;
+  }
+  const go = await modal(left ? `Em còn <b>${left} câu</b> chưa làm.<br>Em chắc chắn muốn nộp bài cho cô?` : 'Em đã kiểm tra kĩ chưa?<br>Nộp bài cho cô nhé?', 'Nộp bài', 'Làm tiếp ✏️');
+  return go && S.phase === 'work';
+}
+// Lần 2: phải sửa ít nhất 1 câu sai
+async function guard2(){
+  if (modalOpen()) return false;
+  const w = wrongKeys().length, c = fixedCount();
+  if (!c){ await modal(`✏️ ${tease('nofix')}<br><small>Sửa các câu sai rồi mới nộp lần 2 nhé!</small>`, '', 'Dạ, em sửa bài 😅'); return false; }
+  const go = await modal(`Em đã sửa <b>${c}/${w}</b> câu sai.<br>Nộp lần 2 cho cô nhé? Nộp xong sẽ hiện đáp án, không sửa được nữa.`, 'Nộp lần 2', 'Sửa tiếp ✏️');
+  return go && S.phase === 'retry';
+}
+// ?lamlai=MÃ: xoá bài đã nộp (giữ tên, lớp) của bài đang mở. Trả về true nếu vừa xoá.
+function applyRedo(key){
+  let qp; try { qp = new URLSearchParams(location.search); } catch (e) { return false; }
+  const tok = qp.get('lamlai'); if (tok === null) return false;
+  qp.delete('lamlai');
+  try { history.replaceState(null, '', location.pathname + (qp.toString() ? '?' + qp : '') + location.hash); } catch (e) {} // tải lại trang không xoá nữa
+  if (!tok.startsWith(RESET_CODE) || !S.r1) return false;
+  const UK = 'lamlai-used', id = key + ':' + tok, got = lsGet(UK), used = Array.isArray(got) ? got : [];
+  if (used.includes(id)) return false;
+  used.push(id); lsSet(UK, used);
+  S = Object.assign(blank(), { name: S.name, cls: S.cls, redo: (S.redo || 0) + 1 });
+  save(); return true;
+}
+const redoTitle = () => S.redo ? ' – LÀM LẠI' + (S.redo > 1 ? ' lần ' + S.redo : '') : '';
+const REDO_MSG = '<div class="okmsg">✅ Cô đã cho em làm lại bài. Bấm <b>Start</b> để bắt đầu nhé!</div>';
+
+/* ============ NỘP BÀI ============ */
+async function onSubmit(){
+  if (REC){ alert('Em đang ghi âm. Bấm ⏹ Stop trước nhé.'); return; }
+  if (S.phase === 'work'){
+    const noRec = RECS.filter(sl => !S.rec[sl.qk]);
+    if (noRec.length){
+      alert('Em chưa ghi âm: ' + noRec.map(sl => sl.label).join('; ') + '.\nPhải ghi âm đủ mới nộp được nhé.');
+      const box = $('#sq-' + noRec[0].qk); if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    const left = QS.filter(q => !answered(q)).length;
+    stopAllAudio();
+    if (!(await guard1(left, QS.length))) return;
+    const g = gradeNow(), at = new Date().toISOString();
+    S.r1 = { at, leaves: S.leaves || 0, score: g.score, total: g.total, items: g.items };
+    S.sid = makeSid();
+    S.phase = g.score === g.total ? 'done' : 'review';
+    save(); paintAll(); window.scrollTo({ top: 0, behavior: 'smooth' });
+    send(); afterSubmit();
+    return;
+  }
+  if (S.phase === 'retry'){
+    if (!(await guard2())) return;
+    const g = gradeNow();
+    // câu đúng ở lần 1 giữ nguyên kết quả
+    Object.keys(S.r1.items).forEach(k => { if (S.r1.items[k].ok) g.items[k] = S.r1.items[k]; });
+    const ks = Object.keys(g.items);
+    S.r2 = { at: new Date().toISOString(), leaves: S.leaves || 0, score: ks.filter(k => g.items[k].ok).length, total: ks.length, items: g.items };
+    S.phase = 'done'; save(); paintAll(); window.scrollTo({ top: 0, behavior: 'smooth' });
+    send(); afterSubmit();
+  }
+}
+
+/* ============ GỬI BÀI ============ */
+let sendState = null, sendErr = '';
+function updateStatus(){
+  const el = $('#sendStatus'); if (!el) return;
+  const allSent = S.sent1 && (!S.r2 || S.sent2);
+  const st = allSent && sendState !== 'sending' ? 'ok' : sendState;
+  el.className = 'status ' + (st || '');
+  if (st === 'ok') el.innerHTML = S.phase === 'retry' || S.phase === 'review' ? '' : '✅ Cô đã nhận được bài!';
+  else if (!st) el.innerHTML = '';
+  else if (st === 'sending') el.innerHTML = '⏳ Đang gửi bài…';
+  else el.innerHTML = `⚠️ Chưa gửi được bài${sendErr ? ` (${esc(sendErr)})` : ''}. Em kiểm tra mạng rồi bấm: <button class="btn sm" type="button" id="resendBtn">Gửi lại</button>`;
+  const rb = $('#resendBtn'); if (rb) rb.onclick = send;
+}
+const secsBetween = (a, b) => a && b ? Math.max(0, Math.round((new Date(b) - new Date(a)) / 1000)) : null;
+
+// Giống các trang BTVN khác: lần 1 gửi ngay; lần 2 gửi kèm kết quả lần 1 để mail so sánh 2 lần.
+const makeSid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const base = () => ({ app: 'btvn', unit: SQ_ID ? 'FCE Side quest' : 'FCE ' + LESSON.kind, title: (SQ_ID ? `FCE Graduation Side quest: ${LESSON.title}` : `FCE Graduation ${LESSON.code} – ${LESSON.title}`) + redoTitle(), name: S.name, cls: S.cls, sid: S.sid || '', redo: S.redo || 0 });
+// withRec: mail lần 1 có thêm các dòng ghi âm (cô chấm, file đính kèm); mail lần 2 chỉ so sánh câu chấm điểm
+function itemsOf(R, withRec){
+  const out = [];
+  LESSON.ex.forEach(e => {
+    QS.filter(q => q.e === e).forEach(q => out.push({ sec: String(exNo(e)), n: q.label, q: qText(q), ans: R.items[q.k].ans, correct: correctText(q), ok: R.items[q.k].ok }));
+    if (withRec) RECS.filter(sl => sl.e === e).forEach(sl => {
+      const m = S.rec[sl.qk];
+      out.push({ sec: String(exNo(e)), n: sl.kind === 'ra' ? '🎙' : 'Q' + (sl.j + 1),
+        q: sl.kind === 'ra' ? 'Read aloud – đọc to các câu đã làm' : plain(e.prompts[sl.j].lead) + ' (nói về bản thân)',
+        ans: m ? '🎙 ' + fmtSec(m.dur) : '(chưa ghi âm)', correct: 'cô chấm', ok: null });
+    });
+  });
+  return out;
+}
+function sectionsOf(items, withRec){
+  return LESSON.ex.filter(e => withRec || e.type !== 'speak').map(e => {
+    const id = String(exNo(e)), its = items.filter(x => x.sec === id), graded = its.filter(x => x.ok !== null);
+    const nRec = withRec ? RECS.filter(sl => sl.e === e).length : 0;
+    return { id, title: `Exercise ${id} · ${plain(e.title)}${nRec ? ` (🎙 ${nRec} file ghi âm đính kèm)` : ''}`,
+      score: graded.filter(x => x.ok).length, total: graded.length, pending: e.type === 'speak' };
+  });
+}
+const blobToB64 = b => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(fr.error); fr.readAsDataURL(b); });
+async function payload1(){
+  const items = itemsOf(S.r1, true), audios = [];
+  for (const sl of RECS){
+    const m = S.rec[sl.qk], blob = m ? await loadRec(sl.qk) : null;
+    if (blob) audios.push({ code: sl.code, label: sl.label, mime: m.mime, ext: m.ext, dur: m.dur, b64: await blobToB64(blob) });
+  }
+  // ✓/✗ (không chấm điểm): gửi kèm để cô xem
+  const extras = LESSON.ex.filter(e => e.tick).map(e => {
+    const rows = [];
+    (e.examples || []).forEach((t, j) => rows.push([e.id + '-ex' + (j || ''), t]));
+    itemsOfEx(e).forEach(it => rows.push([e.id + '-' + it.n, it.t]));
+    const filled = t => plain(String(t).replace(TOK, m0 => { const tk = parseTok([...m0.matchAll(TOK)][0]); return tk.kind === 'gap' ? tk.alts[0] : tk.kind === 'ch' ? tk.opts[tk.correct[0]] : tk.sg; }));
+    return { label: `Exercise ${exNo(e)} – ✓/✗ ${plain(e.title)}`,
+      text: rows.map(([k, t]) => (S.tick[k] === 'y' ? '✓ ' : S.tick[k] === 'n' ? '✗ ' : '– ') + filled(t)).join('\n') };
+  });
+  return Object.assign(base(), {
+    attempt: 1, canRetry: S.r1.score < S.r1.total,
+    startedAt: S.startedAt, submittedAt: S.r1.at, timeTakenSec: secsBetween(S.startedAt, S.r1.at), leaves: S.r1.leaves,
+    score: S.r1.score, total: S.r1.total, sections: sectionsOf(items, true), items, extras, audios, wantsAudio: RECS.length > 0, audio: null,
+  });
+}
+function payload2(){
+  const items = itemsOf(S.r2), first = itemsOf(S.r1);
+  return Object.assign(base(), {
+    attempt: 2, startedAt: S.retryAt || S.r1.at, submittedAt: S.r2.at, timeTakenSec: secsBetween(S.retryAt || S.r1.at, S.r2.at), leaves: Math.max(0, S.r2.leaves - S.r1.leaves),
+    score: S.r2.score, total: S.r2.total, sections: sectionsOf(items, false), items,
+    first: { score: S.r1.score, total: S.r1.total, sections: sectionsOf(first, false), items: first,
+      startedAt: S.startedAt, submittedAt: S.r1.at, timeTakenSec: secsBetween(S.startedAt, S.r1.at), leaves: S.r1.leaves },
+  });
+}
+async function post(p){
+  const tk = window.YumiAuth && YumiAuth.token(); if (tk) p.token = tk; // đã đăng nhập → máy chủ ghi đúng tên + tính XP
+  const r = await fetch(SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(p) });
+  const j = await r.json();
+  if (!j.ok && j.auth && window.YumiAuth){ await YumiAuth.authFailed(YA_OPTS); return post(p); } // hết phiên → đăng nhập lại rồi gửi lại
+  if (!j.ok) throw new Error(j.error || 'máy chủ báo lỗi');
+}
+let sending = false;
+async function send(){
+  if (sending || !S.r1) return;
+  sending = true; sendState = 'sending'; sendErr = ''; updateStatus();
+  try {
+    for (;;){
+      if (!S.sent1){ await post(await payload1()); S.sent1 = true; save(); continue; }
+      if (S.r2 && !S.sent2){ await post(payload2()); S.sent2 = true; save(); continue; }
+      break;
+    }
+    sendState = 'ok';
+  } catch (err){ sendState = 'err'; sendErr = err && err.message ? err.message : String(err); }
+  sending = false; updateStatus();
+}
+
+/* ============ ĐẾM SỐ LẦN RỜI TRANG ============ */
+let away = false, muteAway = false;
+function releaseAway(){ setTimeout(() => { muteAway = false; away = false; }, 800); }
+const tracking = () => S && !!S.startedAt && (S.phase === 'work' || S.phase === 'retry') && $('#work') && !$('#work').hidden;
+function goAway(){ if (muteAway || away || REC || !tracking()) return; away = true; S.leaves = (S.leaves || 0) + 1; save(); }
+function comeBack(){
+  if (document.hidden || !document.hasFocus()) return;
+  const was = away; away = false;
+  if (was && tracking() && (S.leaves || 0) > 5) toast(`🕵️ ${tease('away')} <small>(rời trang ${S.leaves} lần)</small>`);
+}
+document.addEventListener('visibilitychange', () => document.hidden ? goAway() : comeBack());
+window.addEventListener('blur', goAway);
+window.addEventListener('focus', comeBack);
+
+/* ============ KHỞI ĐỘNG ============ */
+function boot(){
+  if (YA && !YA.me()){ YA.require(YA_OPTS).then(() => { yaSync(); boot(); }); return; } // bắt đăng nhập trước
+  yaSync();
+  migrateB2();
+  if (!LESSON){
+    $('#bar').hidden = true;
+    if (WEEK_NO || SQ_ID) { $('#app').innerHTML = '<div class="card">🔒 Bài này chưa mở. <a href="./">← Quay lại danh sách bài</a></div>'; return; }
+    renderHome(); return;
+  }
+  $('#back').hidden = false;
+  S = Object.assign(blank(), lsGet(myKey()) || {});
+  const redone = applyRedo(myKey()); // mở link làm lại của cô
+  // dữ liệu lưu không thuộc bài này (bài đã đổi tuần) → bắt đầu sạch
+  const own = new Set(LESSON.ex.map(e => e.id));
+  if (Object.keys(S.a || {}).some(k => !own.has(k.replace(/-.*$/, '')))){ migrateB2(); S = blank(); save(); }
+  buildLesson();
+  if (redone) $('#startErr').insertAdjacentHTML('beforebegin', REDO_MSG);
+  $('#submitBtn').addEventListener('click', onSubmit);
+  if (S.startedAt && S.name) showWork();
+  paintAll();
+  if (S.r1 && (!S.sent1 || (S.r2 && !S.sent2))) send(); // lần trước chưa gửi được → gửi lại
+}
+document.addEventListener("DOMContentLoaded", boot); // chờ fun.js nạp xong
