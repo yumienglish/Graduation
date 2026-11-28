@@ -240,13 +240,7 @@ function renderHome(){
       <img class="hmas" src="img/ui/mascot-1.webp" alt="">
       ${me.av ? `<div class="hiav">${avHtml(me.av, 'av big')}</div>` : ''}
       <h2>Hi ${first ? esc(first) : 'superstar'}! 🌟</h2>
-      ${titleChip(d)}
       <p class="hiline">${hiLine()}</p>
-      <div class="stats">
-        <div class="stat"><b>⭐ ${stars}</b><span>stars</span></div>
-        <div class="stat"><b>📒 ${words}</b><span>new words</span></div>
-        <div class="stat"><b>🏁 ${done}</b><span>adventures</span></div>
-      </div>
       ${rankHtml(stars)}
       ${stars ? '' : '<p class="muted small" style="margin:10px 0 0">Your first stars are waiting for you! ⭐</p>'}
     </section>

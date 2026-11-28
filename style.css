@@ -800,17 +800,6 @@ body.noscroll{overflow:hidden}
 .st.boss.lock .node img{filter:grayscale(1) brightness(.5)}
 .st.boss .slab b{color:#ff5277!important}
 /* danh hiệu */
-.ttl{font:inherit;font-weight:700;margin:4px auto 0;display:inline-flex;gap:6px;align-items:center;background:rgba(255,200,61,.12);color:#ffc83d;border:1px solid rgba(255,200,61,.5);border-radius:999px;padding:4px 14px;cursor:pointer}
-.ttl b{font-family:Rajdhani,Nunito,sans-serif;letter-spacing:.06em;text-transform:uppercase}
-.ttl span{opacity:.7;font-size:12px}
-.ttlcard{max-width:520px}
-.ttls{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 12px;text-align:left}
-.ttlo{font:inherit;display:flex;flex-direction:column;background:rgba(11,15,30,.6);border:1px solid #2b3466;border-radius:10px;padding:8px 10px;color:#e9edff;cursor:pointer}
-.ttlo b{font-family:Rajdhani,Nunito,sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#ffc83d}
-.ttlo small{color:#9ba5d8;font-size:12px}
-.ttlo.cur{border-color:#ffc83d;box-shadow:0 0 14px rgba(255,200,61,.35)}
-.ttlo.off{opacity:.5;cursor:default} .ttlo.off b{color:#9ba5d8}
-@media (max-width:520px){.ttls{grid-template-columns:1fr}}
 /* khung avatar theo rank */
 body[class*="rk-"] .av{box-shadow:0 0 0 2px #0b0f1e,0 0 0 4px var(--rkc),0 0 14px var(--rkc)}
 body.rk-1{--rkc:#c0703a} body.rk-2{--rkc:#c9d3e6} body.rk-3{--rkc:#ffc83d} body.rk-4{--rkc:#3ee6c8} body.rk-5{--rkc:#4fa3ff} body.rk-6{--rkc:#c86bff}

@@ -417,7 +417,7 @@ function startBattle(cfg){
   const totalW = qs.reduce((s, q) => s + (q.ult ? 2 : 1), 0);
   const B = { i: 0, ehp: 100, php: 100, combo: 0, maxCombo: 0, res: [], lost: 0, ki: 0, shield: false, supers: 0, blocks: 0, busy: false, startedAt: new Date().toISOString(), over: false };
   window.__BT = B; // để kiểm thử tự động
-  const pname = String(me.name || 'You').trim().split(/\s+/).pop(), title = typeof activeTitle === 'function' && activeTitle() ? activeTitle().n : '';
+  const pname = String(me.name || 'You').trim().split(/\s+/).pop();
   const ov = document.createElement('div'); ov.className = 'bt'; ov.id = 'bt';
   ov.innerHTML = `
     <div class="ar" id="btAr">
@@ -430,7 +430,7 @@ function startBattle(cfg){
       </div>
       <div class="bth">
         <div class="bth-side">
-          <div class="bth-name">${avHtml(me.av || AVATARS[0], 'av')}<span>${esc(pname)}${title ? `<small>${esc(title)}</small>` : ''}</span></div>
+          <div class="bth-name">${avHtml(me.av || AVATARS[0], 'av')}<span>${esc(pname)}</span></div>
           <div class="hp"><i class="trail" id="pTrail"></i><i class="fill p" id="pFill"></i></div>
           <div class="ki" id="kiBar" title="Energy"><i id="kiFill"></i></div>
         </div>

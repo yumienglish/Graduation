@@ -100,37 +100,6 @@ const rankIdx = stars => { let i = 0; RANKS.forEach((r, j) => { if (stars >= r.m
 // khung avatar neon theo rank (body.rk-1 … rk-6)
 function applyRankFrame(){ try { const i = rankIdx(gameData().stars) + 1; document.body.className = document.body.className.replace(/\brk-\d\b/g, '').trim(); document.body.classList.add('rk-' + i); } catch (e) {} }
 
-/* ---------- Danh hiệu (chọn 1 để hiện cạnh tên) ---------- */
-const TITLE_KEY = 'grad-title';
-const TITLES = [
-  { id: 'rookie', n: 'Rookie', vi: 'Danh hiệu khởi đầu', test: () => true },
-  { id: 'explorer', n: 'Explorer', vi: 'Làm xong bài đầu tiên', test: d => d.done >= 1 },
-  { id: 'sniper', n: 'Exam Sniper', vi: 'Đúng hết ngay lần 1 một màn Test', test: d => d.states.some(x => x.s.r1 && x.s.r1.total && x.s.r1.score === x.s.r1.total) },
-  { id: 'hunter', n: 'Vocab Hunter', vi: 'Học được 30 từ mới', test: d => d.words >= 30 },
-  { id: 'speed', n: 'Speed Demon', vi: 'Đạt 10/10 trong Quick review', test: d => d.rev.best >= 10 },
-  { id: 'comeback', n: 'Comeback Kid', vi: 'Làm lại câu sai và sửa đúng hết', test: d => d.states.some(x => x.s.r2 && x.s.r2.score === x.s.r2.total) },
-  { id: 'slayer', n: 'Mistake Slayer', vi: 'Hạ gục 15 câu sai trong Revenge mode', test: d => d.bat.beaten >= 15 },
-  { id: 'assassin', n: 'Silent Assassin', vi: 'Thắng Revenge mà không mất máu', test: d => d.bat.flawless >= 1 },
-  { id: 'bossslayer', n: 'Boss Slayer', vi: 'Đánh bại 1 Boss', test: d => d.bat.bossWins >= 1 },
-  { id: 'diamond', n: 'Diamond Mind', vi: 'Lên rank Diamond', test: d => d.stars >= 42 },
-];
-function activeTitle(d){
-  d = d || gameData(); const got = TITLES.filter(t => t.test(d)), id = lsGet(TITLE_KEY);
-  return got.find(t => t.id === id) || got[got.length - 1];
-}
-function titleChip(d){ const t = activeTitle(d); return `<button class="ttl" type="button" id="ttlBtn">🏷️ <b>${esc(t.n)}</b> <span>▾</span></button>`; }
-function openTitles(){
-  const d = gameData(), cur = activeTitle(d);
-  const ov = document.createElement('div'); ov.className = 'fxov';
-  ov.innerHTML = `<div class="fxcard ttlcard"><div class="fxt">🏷️ Choose your title</div><div class="ttls">${TITLES.map(t => { const on = t.test(d);
-    return `<button type="button" class="ttlo${on ? '' : ' off'}${t.id === cur.id ? ' cur' : ''}" data-t="${t.id}"${on ? '' : ' disabled'}><b>${on ? '' : '🔒 '}${esc(t.n)}</b><small>${esc(t.vi)}</small></button>`; }).join('')}</div>
-    <button class="btn lite" type="button" id="ttlClose">Close</button></div>`;
-  ov.addEventListener('click', ev => {
-    const b = ev.target.closest('.ttlo'); if (b && !b.disabled){ lsSet(TITLE_KEY, b.dataset.t); sfx('pop'); ov.remove(); renderHome(); return; }
-    if (ev.target === ov || ev.target.id === 'ttlClose') ov.remove();
-  });
-  document.body.appendChild(ov);
-}
 
 /* ---------- Side quest (video cô làm) ---------- */
 function sideQuestCard(){
@@ -316,7 +285,6 @@ function afterHome(){
   const cur = $('#map .st.cur');
   if (cur && $$('#map .st').indexOf(cur) >= 3) cur.scrollIntoView({ block: 'center' });
   setTimeout(checkBadges, 600);
-  const tb = $('#ttlBtn'); if (tb) tb.onclick = openTitles;
   applyRankFrame();
   if (typeof afterHomeBattle === 'function') afterHomeBattle();
 }
